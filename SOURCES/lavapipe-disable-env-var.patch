@@ -1,0 +1,13 @@
+diff -up mesa-21.3.0/src/gallium/frontends/lavapipe/lvp_device.cdma mesa-21.3.0/src/gallium/frontends/lavapipe/lvp_device.c
+--- mesa-21.3.0/src/gallium/frontends/lavapipe/lvp_device.cdma	2021-11-18 06:16:20.000000000 +1000
++++ mesa-21.3.0/src/gallium/frontends/lavapipe/lvp_device.c	2021-11-18 07:03:17.652283186 +1000
+@@ -213,6 +213,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_Creat
+    if (pAllocator == NULL)
+       pAllocator = vk_default_allocator();
+ 
++   if (!getenv("RH_SW_VULKAN"))
++      return VK_ERROR_INITIALIZATION_FAILED;
++
+    instance = vk_zalloc(pAllocator, sizeof(*instance), 8,
+                         VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+    if (!instance)
