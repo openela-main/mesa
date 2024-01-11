@@ -52,9 +52,9 @@
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-%global ver 22.3.0
+%global ver 23.1.4
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
-Release:        2%{?dist}
+Release:        1%{?dist}
 License:        MIT
 URL:            http://www.mesa3d.org
 
@@ -65,7 +65,6 @@ Source0:        https://mesa.freedesktop.org/archive/%{name}-%{ver}.tar.xz
 Source1:        Mesa-MLAA-License-Clarification-Email.txt
 
 Patch10:	gnome-shell-glthread-disable.patch
-Patch11:        0001-glx-fix-xshm-check-to-init-xshm_opcode.patch
 Patch12:        radeonsi-turn-off-glthread.patch
 
 BuildRequires:  meson >= 0.45
@@ -350,6 +349,9 @@ cp %{SOURCE1} docs/
   -Dvalgrind=%{?with_valgrind:enabled}%{!?with_valgrind:disabled} \
   -Dbuild-tests=false \
   -Dselinux=true \
+  -Dlibunwind=disabled \
+  -Dlmsensors=disabled \
+  -Dandroid-libbacktrace=disabled \
   %{nil}
 %meson_build
 
@@ -603,6 +605,12 @@ popd
 %endif
 
 %changelog
+* Thu Jul 27 2023 Dave Airlie <airlied@redhat.com> - 23.1.4-1
+- Update to mesa 23.1.4
+
+* Wed May 17 2023 Dave Airlie <airlied@redhat.com> - 23.1.0-1
+- Update to mesa 23.1.0
+
 * Fri Jan 27 2023 Dave Airlie <airlied@redhat.com> - 22.3.0-2
 - Disable glthread, breaks gtk3/totem
 
