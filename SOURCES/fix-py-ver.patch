@@ -1,0 +1,12 @@
+diff -up mesa-23.1.4/meson.build.dma mesa-23.1.4/meson.build
+--- mesa-23.1.4/meson.build.dma	2023-07-28 10:15:41.807945483 +1000
++++ mesa-23.1.4/meson.build	2023-07-28 10:15:46.465030794 +1000
+@@ -835,7 +835,7 @@ if get_option('allow-kcmp') \
+   pre_args += '-DALLOW_KCMP'
+ endif
+ 
+-prog_python = import('python').find_installation('python3')
++prog_python = import('python').find_installation('python3.6')
+ has_mako = run_command(
+   prog_python, '-c',
+   '''

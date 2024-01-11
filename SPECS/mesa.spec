@@ -37,8 +37,8 @@
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-Version:        22.3.0
-Release:        2%{?rctag:.%{rctag}}%{?dist}
+Version:        23.1.4
+Release:        1%{?rctag:.%{rctag}}%{?dist}
 
 License:        MIT
 URL:            http://www.mesa3d.org
@@ -52,16 +52,20 @@ Source3:        Makefile
 # Fedora opts to ignore the optional part of clause 2 and treat that code as 2 clause BSD.
 Source4:        Mesa-MLAA-License-Clarification-Email.txt
 
+# build our own newer meson
+Source5: meson-0.61.4.tar.gz
+Source6: dataclasses-0.8.tar.gz
+
 Patch0:	lavapipe-disable-env-var.patch
 
+Patch1: fix-py-ver.patch
 Patch10: gnome-shell-glthread-disable.patch
-Patch11: 0001-glx-fix-xshm-check-to-init-xshm_opcode.patch
 Patch12: radeonsi-turn-off-glthread.patch
 
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
 
-BuildRequires:  meson >= 0.45
+BuildRequires:  meson
 %if %{with_hardware}
 BuildRequires:  kernel-headers
 %endif
@@ -315,15 +319,27 @@ Headers for development with the Vulkan API.
 
 cp %{SOURCE4} docs/
 
+tar -xvf %{SOURCE5}
+tar -xvf %{SOURCE6}
+
 pathfix.py -i %{__python3} -pn bin/*.py src/egl/generate/*.py \
                                src/gallium/tools/trace/*.py \
                                src/compiler/glsl/tests/*.py \
                                src/compiler/glsl/glcpp/tests/*.py
 
 %build
-
+cd meson-0.61.4
+%py3_build
+%py3_install
+cd -
+cd dataclasses-0.8
+%py3_build
+%py3_install
+cd -
 export ASFLAGS="--generate-missing-build-notes=yes"
-%meson -Dcpp_std=gnu++14 \
+%global __meson %{buildroot}/usr/bin/meson
+export PYTHONPATH=/usr/lib/python3.6/site-packages/:%{buildroot}/usr/lib/python3.6/site-packages/
+%meson -Dcpp_std=gnu++17 \
   -Db_ndebug=true \
   -Dplatforms=x11,wayland \
   -Ddri3=enabled \
@@ -355,11 +371,24 @@ export ASFLAGS="--generate-missing-build-notes=yes"
   -Dvalgrind=%{?with_valgrind:true}%{!?with_valgrind:false} \
   -Dbuild-tests=false \
   -Dselinux=true \
+  -Dlibunwind=disabled \
+  -Dlmsensors=disabled \
+  -Dandroid-libbacktrace=disabled \
   %{nil}
 %meson_build
 
 %install
+cd meson-0.61.4
+%py3_install
+cd -
+export PYTHONPATH=%{buildroot}/usr/lib/python3.6/site-packages/
 %meson_install
+
+#nuke the meson install bits
+rm -rf %{buildroot}/usr/lib/python3.6/
+rm -f %{buildroot}/usr/bin/meson
+rm -rf %{buildroot}/usr/share/man/
+rm -f %{buildroot}/usr/share/polkit-1/actions/com.mesonbuild.install.policy
 
 # libvdpau opens the versioned name, don't bother including the unversioned
 rm -vf %{buildroot}%{_libdir}/vdpau/*.so
@@ -554,6 +583,12 @@ done
 %endif
 
 %changelog
+* Thu Jul 27 2023 Dave Airlie <airlied@redhat.com> - 23.1.4-1
+- Update to 23.1.4
+
+* Mon May 22 2023 Dave Airlie <airlied@redhat.com> - 23.1.0-1
+- Update to 23.1.0
+
 * Fri Jan 27 2023 Dave Airlie <airlied@redhat.com> - 22.3.0-2
 - disable glthread for radeonsi (breaks totem)
 
