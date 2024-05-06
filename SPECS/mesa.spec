@@ -52,7 +52,7 @@
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-%global ver 23.1.4
+%global ver 23.3.3
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
 Release:        1%{?dist}
 License:        MIT
@@ -66,6 +66,13 @@ Source1:        Mesa-MLAA-License-Clarification-Email.txt
 
 Patch10:	gnome-shell-glthread-disable.patch
 Patch12:        radeonsi-turn-off-glthread.patch
+Patch13:        zink-fix-resizable-bar-detection-logic.patch
+Patch14:        mesa-meson-c99.patch
+# Temporary disabling Zink as a fallback between HW and SW drivers due to
+# multiple regression caused by this change during the 23.3.X development cycle.
+# Remove these 2 patches if updating to 24.X.X:
+Patch15:        0001-Revert-egl-add-automatic-zink-fallback-loading-betwe.patch
+Patch16:        0002-Revert-glx-add-automatic-zink-fallback-loading-betwe.patch
 
 BuildRequires:  meson >= 0.45
 BuildRequires:  gcc
@@ -352,6 +359,9 @@ cp %{SOURCE1} docs/
   -Dlibunwind=disabled \
   -Dlmsensors=disabled \
   -Dandroid-libbacktrace=disabled \
+%ifarch %{ix86}
+  -Dglx-read-only-text=true \
+%endif
   %{nil}
 %meson_build
 
@@ -540,6 +550,7 @@ popd
 %if 0%{?with_kmsro}
 %{_libdir}/dri/armada-drm_dri.so
 %{_libdir}/dri/exynos_dri.so
+%{_libdir}/dri/hdlcd_dri.so
 %{_libdir}/dri/hx8357d_dri.so
 %{_libdir}/dri/ili9225_dri.so
 %{_libdir}/dri/ili9341_dri.so
@@ -605,6 +616,21 @@ popd
 %endif
 
 %changelog
+* Wed Jan 17 2024 José Expósito <jexposit@redhat.com> - 23.3.3-1
+- Update to mesa 23.3.3
+
+* Thu Nov 30 2023 José Expósito <jexposit@redhat.com> - 23.3.0-1
+- Update to mesa 23.3.0
+
+* Wed Nov 22 2023 José Expósito <jexposit@redhat.com> - 23.3.0-rc2-3
+- Backport MR #26332 to fix X11 session on VMs
+
+* Fri Nov 17 2023 José Expósito <jexposit@redhat.com> - 23.3.0-rc2-2
+- Backport MR #26220 to fix GNOME apps crash
+
+* Mon Nov 06 2023 José Expósito <jexposit@redhat.com> - 23.3.0-rc2-1
+- Update to mesa 23.3.0-rc2
+
 * Thu Jul 27 2023 Dave Airlie <airlied@redhat.com> - 23.1.4-1
 - Update to mesa 23.1.4
 
