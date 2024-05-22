@@ -38,7 +38,7 @@
 Name:           mesa
 Summary:        Mesa graphics libraries
 Version:        23.1.4
-Release:        1%{?rctag:.%{rctag}}%{?dist}
+Release:        2%{?rctag:.%{rctag}}%{?dist}
 
 License:        MIT
 URL:            http://www.mesa3d.org
@@ -61,6 +61,10 @@ Patch0:	lavapipe-disable-env-var.patch
 Patch1: fix-py-ver.patch
 Patch10: gnome-shell-glthread-disable.patch
 Patch12: radeonsi-turn-off-glthread.patch
+
+# Required to build against LLVM 17
+Patch13: 0001-llvmpipe-only-include-old-Transform-includes-when-ne.patch
+Patch14: 0001-clover-llvm-move-to-modern-pass-manager.patch
 
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
@@ -583,6 +587,9 @@ done
 %endif
 
 %changelog
+* Thu Nov 23 2023 José Expósito <jexposit@redhat.com> - 23.1.4-2
+- Rebuild against LLVM 17
+
 * Thu Jul 27 2023 Dave Airlie <airlied@redhat.com> - 23.1.4-1
 - Update to 23.1.4
 
