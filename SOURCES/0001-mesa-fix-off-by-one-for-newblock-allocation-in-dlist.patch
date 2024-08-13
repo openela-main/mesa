@@ -1,0 +1,28 @@
+From 460d2c46a903fed295a1528c8b6273dd6b0e0d19 Mon Sep 17 00:00:00 2001
+From: thfrwn <11335318+rfht@users.noreply.github.com>
+Date: Fri, 9 Feb 2024 17:00:55 -0500
+Subject: [PATCH] mesa: fix off-by-one for newblock allocation in dlist_alloc
+
+Cc: mesa-stable
+Reviewed-by: Pierre-Eric Pelloux-Prayer <pierre-eric.pelloux-prayer@amd.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/27556>
+---
+ src/mesa/main/dlist.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/mesa/main/dlist.c b/src/mesa/main/dlist.c
+index b0184a24e20..9213641699a 100644
+--- a/src/mesa/main/dlist.c
++++ b/src/mesa/main/dlist.c
+@@ -1220,7 +1220,7 @@ dlist_alloc(struct gl_context *ctx, OpCode opcode, GLuint bytes, bool align8)
+       ctx->ListState.CurrentPos++;
+    }
+ 
+-   if (ctx->ListState.CurrentPos + numNodes + contNodes > BLOCK_SIZE) {
++   if (ctx->ListState.CurrentPos + numNodes + contNodes >= BLOCK_SIZE) {
+       /* This block is full.  Allocate a new block and chain to it */
+       Node *newblock;
+       Node *n = ctx->ListState.CurrentBlock + ctx->ListState.CurrentPos;
+-- 
+2.45.2
+

@@ -38,7 +38,7 @@
 Name:           mesa
 Summary:        Mesa graphics libraries
 Version:        23.1.4
-Release:        2%{?rctag:.%{rctag}}%{?dist}
+Release:        3%{?rctag:.%{rctag}}%{?dist}
 
 License:        MIT
 URL:            http://www.mesa3d.org
@@ -65,6 +65,9 @@ Patch12: radeonsi-turn-off-glthread.patch
 # Required to build against LLVM 17
 Patch13: 0001-llvmpipe-only-include-old-Transform-includes-when-ne.patch
 Patch14: 0001-clover-llvm-move-to-modern-pass-manager.patch
+
+# https://issues.redhat.com/browse/RHEL-40566
+Patch15: 0001-mesa-fix-off-by-one-for-newblock-allocation-in-dlist.patch
 
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
@@ -587,6 +590,10 @@ done
 %endif
 
 %changelog
+* Thu Jun 20 2024 José Expósito <jexposit@redhat.com> - 23.1.4-3
+- Fix off-by-one error for newblock allocation in dlist_alloc
+  Resolves: https://issues.redhat.com/browse/RHEL-40566
+
 * Thu Nov 23 2023 José Expósito <jexposit@redhat.com> - 23.1.4-2
 - Rebuild against LLVM 17
 
