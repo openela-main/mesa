@@ -1,0 +1,37 @@
+From f7434d7576032cf97e3c74ef09912f59617a4bad Mon Sep 17 00:00:00 2001
+From: Dave Airlie <airlied@redhat.com>
+Date: Fri, 14 Jun 2024 12:22:58 +1000
+Subject: [PATCH] nouveau/nvc0: increase overallocation on shader bo to 2K
+
+I've been seeing a bunch of read page faults at the end of the
+shader allocation, nvk uses a full page at the end to overallocate
+so align with that and see if it goes away.
+
+ahulliet and skeggsb both said 2k was used.
+
+Cc: mesa-stable
+Reviewed-by: Arthur Huillet <ahuillet@nvidia.com>
+Reviewed-by: Karol Herbst <kherbst@redhat.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/29722>
+---
+ src/gallium/drivers/nouveau/nvc0/nvc0_screen.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff -up mesa-23.1.4/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c.dma mesa-23.1.4/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c
+--- mesa-23.1.4/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c.dma	2023-07-21 22:42:42.000000000 +1000
++++ mesa-23.1.4/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c	2024-08-16 12:49:13.532998512 +1000
+@@ -886,10 +886,11 @@ nvc0_screen_resize_text_area(struct nvc0
+    nouveau_heap_free(&screen->lib_code);
+    nouveau_heap_destroy(&screen->text_heap);
+ 
+-   /* XXX: getting a page fault at the end of the code buffer every few
+-    *  launches, don't use the last 256 bytes to work around them - prefetch ?
++   /*
++    * Shader storage needs a 2K (from NVIDIA) overallocations at the end
++    * to avoid prefetch bugs.
+     */
+-   nouveau_heap_init(&screen->text_heap, 0, size - 0x100);
++   nouveau_heap_init(&screen->text_heap, 0, size - 0x800);
+ 
+    /* update the code segment setup */
+    if (screen->eng3d->oclass < GV100_3D_CLASS) {

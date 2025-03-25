@@ -38,7 +38,7 @@
 Name:           mesa
 Summary:        Mesa graphics libraries
 Version:        23.1.4
-Release:        3%{?rctag:.%{rctag}}%{?dist}
+Release:        4%{?rctag:.%{rctag}}%{?dist}
 
 License:        MIT
 URL:            http://www.mesa3d.org
@@ -69,6 +69,10 @@ Patch14: 0001-clover-llvm-move-to-modern-pass-manager.patch
 # https://issues.redhat.com/browse/RHEL-40566
 Patch15: 0001-mesa-fix-off-by-one-for-newblock-allocation-in-dlist.patch
 
+# two nouveau fixes to avoid kernel crashes with multiple cards
+Patch20: 0001-nouveau-nvc0-increase-overallocation-on-shader-bo-to.patch
+Patch21: nouveau-work-around-linear-zs-issue.patch
+
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
 
@@ -92,7 +96,7 @@ BuildRequires:  elfutils
 BuildRequires:  python3-devel
 BuildRequires:  gettext
 BuildRequires:  glslang
-BuildRequires: %{llvm_pkg_prefix}llvm-devel >= 3.4-7
+BuildRequires: %{llvm_pkg_prefix}llvm-compat-devel >= 3.4-7
 %if 0%{?with_opencl}
 BuildRequires: %{llvm_pkg_prefix}clang-devel >= 3.0
 %endif
@@ -346,6 +350,7 @@ cd -
 export ASFLAGS="--generate-missing-build-notes=yes"
 %global __meson %{buildroot}/usr/bin/meson
 export PYTHONPATH=/usr/lib/python3.6/site-packages/:%{buildroot}/usr/lib/python3.6/site-packages/
+export PATH=%{_libdir}/llvm17/bin:$PATH
 %meson -Dcpp_std=gnu++17 \
   -Db_ndebug=true \
   -Dplatforms=x11,wayland \
@@ -590,6 +595,9 @@ done
 %endif
 
 %changelog
+* Mon Mar 17 2025 Dave Airlie <airlied@redhat.com> - 23.1.4-4
+- Fix two nouveau bugs for customer (RHEL-54452)
+
 * Thu Jun 20 2024 José Expósito <jexposit@redhat.com> - 23.1.4-3
 - Fix off-by-one error for newblock allocation in dlist_alloc
   Resolves: https://issues.redhat.com/browse/RHEL-40566
