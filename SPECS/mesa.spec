@@ -1,15 +1,20 @@
 %ifnarch s390x
 %global with_hardware 1
+%global with_radeonsi 1
+%global with_vmware 1
 %global with_vulkan_hw 1
 %global with_vdpau 1
 %global with_va 1
 %if !0%{?rhel}
+%global with_r300 1
+%global with_r600 1
 %global with_nine 1
-%global with_nvk %{with vulkan_hw}
-%global with_omx 1
+%if 0%{?with_vulkan_hw}
+%global with_nvk %{with_vulkan_hw}
+%endif
 %global with_opencl 1
 %endif
-%global base_vulkan ,amd
+%global base_vulkan %{?with_vulkan_hw:,amd}%{!?with_vulkan_hw:%{nil}}
 %endif
 
 %ifnarch %{ix86}
@@ -20,37 +25,30 @@
 
 %ifarch %{ix86} x86_64
 %global with_iris   1
-%global with_crocus   1
-%global with_vmware 1
+%global with_crocus 1
 %global with_xa     1
 %global with_intel_clc 1
-%global intel_platform_vulkan ,intel,intel_hasvk
+%global intel_platform_vulkan %{?with_vulkan_hw:,intel,intel_hasvk}%{!?with_vulkan_hw:%{nil}}
 %endif
 %ifarch x86_64
+%if !0%{?with_vulkan_hw}
 %global with_intel_vk_rt 1
+%endif
 %endif
 
 %ifarch %{arm} aarch64
 %if !0%{?rhel}
 %global with_etnaviv   1
 %global with_lima      1
+%global with_tegra     1
 %global with_vc4       1
 %global with_v3d       1
 %endif
 %global with_freedreno 1
 %global with_kmsro     1
 %global with_panfrost  1
-%global with_tegra     1
 %global with_xa        1
-%global extra_platform_vulkan ,broadcom,freedreno
-%endif
-
-%ifnarch %{arm} s390x
-%if !0%{?rhel}
-%global with_r300 1
-%global with_r600 1
-%endif
-%global with_radeonsi 1
+%global extra_platform_vulkan %{?with_vulkan_hw:,broadcom,freedreno,panfrost,imagination-experimental}%{!?with_vulkan_hw:%{nil}}
 %endif
 
 %if !0%{?rhel}
@@ -68,9 +66,9 @@
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-%global ver 24.1.2
+%global ver 24.2.8
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
-Release:        3%{?dist}
+Release:        2%{?dist}
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
 URL:            http://www.mesa3d.org
 
@@ -84,9 +82,9 @@ Source1:        Mesa-MLAA-License-Clarification-Email.txt
 %global meson_ver 1.3.0
 Source2: https://github.com/mesonbuild/meson/releases/download/%{meson_ver}/meson-%{meson_ver}.tar.gz
 
-# libclc is not available in RHEL 9 but it is required for Intel drivers since
+# libclc is not available in RHEL but it is required for Intel drivers since
 # mesa >= 24.1.0
-%global libclc_version 18.1.2
+%global libclc_version 19.1.1
 Source3: https://github.com/llvm/llvm-project/releases/download/llvmorg-%{libclc_version}/libclc-%{libclc_version}.src.tar.xz
 BuildRequires:  libedit-devel
 BuildRequires:  clang-devel >= %{libclc_version}
@@ -94,8 +92,8 @@ BuildRequires:  clang-devel >= %{libclc_version}
 # BuildRequires:  spirv-llvm-translator-tools
 
 # spirv-llvm-translator is a dependency of libclc
-%global spirv_llvm_trans_ver 18.1.0
-%global spirv_llvm_trans_commit 259f72c06ce9dff3867f842aaeb1e414c97066a5
+%global spirv_llvm_trans_ver 19.1.1
+%global spirv_llvm_trans_commit 90a976491d3847657396456e0e94d7dc48d35996
 %global spirv_llvm_trans_shortcommit %(c=%{spirv_llvm_trans_commit}; echo ${c:0:7})
 Source4: https://github.com/KhronosGroup/SPIRV-LLVM-Translator/archive/%{spirv_llvm_trans_commit}/spirv-llvm-translator-%{spirv_llvm_trans_shortcommit}.tar.gz
 BuildRequires:  cmake
@@ -110,13 +108,12 @@ BuildRequires:  zlib-devel
 Source5:        https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/%{wayland_protocols_ver}/downloads/wayland-protocols-%{wayland_protocols_ver}.tar.xz
 BuildRequires:  wayland-devel
 
-# mesa patches (< 10000)
 Patch10:        gnome-shell-glthread-disable.patch
-Patch11:        0001-llvmpipe-Init-eglQueryDmaBufModifiersEXT-num_modifie.patch
-Patch12:        0001-Revert-ac-radeonsi-remove-has_syncobj-has_fence_to_h.patch
 
-# s390x only
-Patch100:       fix-egl-on-s390x.patch
+# AMD Navi4x support:
+# Backport fixes for radeonsi and disable GFX12 on radv
+# https://issues.redhat.com/browse/RHEL-53419
+Patch11:        RHEL-53423.patch
 
 # Build our own version but keep the dependency for the RPM macros
 BuildRequires:  meson
@@ -129,7 +126,7 @@ BuildRequires:  kernel-headers
 # We only check for the minimum version of pkgconfig(libdrm) needed so that the
 # SRPMs for each arch still have the same build dependencies. See:
 # https://bugzilla.redhat.com/show_bug.cgi?id=1859515
-BuildRequires:  pkgconfig(libdrm) >= 2.4.119
+BuildRequires:  pkgconfig(libdrm) >= 2.4.121
 %if 0%{?with_libunwind}
 BuildRequires:  pkgconfig(libunwind)
 %endif
@@ -172,9 +169,6 @@ BuildRequires:  pkgconfig(vdpau) >= 1.1
 %if 0%{?with_va}
 BuildRequires:  pkgconfig(libva) >= 0.38.0
 %endif
-%if 0%{?with_omx}
-BuildRequires:  pkgconfig(libomxil-bellagio)
-%endif
 BuildRequires:  pkgconfig(libelf)
 BuildRequires:  pkgconfig(libglvnd) >= 1.3.2
 BuildRequires:  llvm-devel >= %{libclc_version}
@@ -211,6 +205,7 @@ BuildRequires:  python3-mako
 BuildRequires:  python3-ply
 %endif
 BuildRequires:  python3-pycparser
+BuildRequires:  python3-pyyaml
 BuildRequires:  vulkan-headers
 BuildRequires:  glslang
 %if 0%{?with_vulkan_hw}
@@ -223,6 +218,7 @@ BuildRequires:  pkgconfig(vulkan)
 %package filesystem
 Summary:        Mesa driver filesystem
 Provides:       mesa-dri-filesystem = %{?epoch:%{epoch}:}%{version}-%{release}
+Obsoletes:      mesa-omx-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description filesystem
 %{summary}.
@@ -282,15 +278,6 @@ Requires:       (%{name}-libEGL%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{releas
 
 %description dri-drivers
 %{summary}.
-
-%if 0%{?with_omx}
-%package omx-drivers
-Summary:        Mesa-based OMX drivers
-Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-
-%description omx-drivers
-%{summary}.
-%endif
 
 %if 0%{?with_va}
 %package        va-drivers
@@ -425,17 +412,14 @@ Requires:       %{name}-libd3d%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release
 %package vulkan-drivers
 Summary:        Mesa Vulkan drivers
 Requires:       vulkan%{_isa}
+Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-vulkan-devel < %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description vulkan-drivers
 The drivers with support for the Vulkan API.
 
 %prep
-%autosetup -n %{name}-%{ver} -N
-%autopatch -p1 -M 99
-%ifarch s390x
-%autopatch -p1 -m 100
-%endif
+%autosetup -n %{name}-%{ver} -p1
 cp %{SOURCE1} docs/
 
 # Extract meson
@@ -529,12 +513,11 @@ export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
   -Ddri3=enabled \
   -Dosmesa=true \
 %if 0%{?with_hardware}
-  -Dgallium-drivers=swrast,virgl,nouveau%{?with_r300:,r300}%{?with_crocus:,crocus}%{?with_iris:,iris}%{?with_vmware:,svga}%{?with_radeonsi:,radeonsi}%{?with_r600:,r600}%{?with_freedreno:,freedreno}%{?with_etnaviv:,etnaviv}%{?with_tegra:,tegra}%{?with_vc4:,vc4}%{?with_v3d:,v3d}%{?with_kmsro:,kmsro}%{?with_lima:,lima}%{?with_panfrost:,panfrost}%{?with_vulkan_hw:,zink} \
+  -Dgallium-drivers=swrast,virgl,nouveau%{?with_r300:,r300}%{?with_crocus:,crocus}%{?with_iris:,iris}%{?with_vmware:,svga}%{?with_radeonsi:,radeonsi}%{?with_r600:,r600}%{?with_freedreno:,freedreno}%{?with_etnaviv:,etnaviv}%{?with_tegra:,tegra}%{?with_vc4:,vc4}%{?with_v3d:,v3d}%{?with_lima:,lima}%{?with_panfrost:,panfrost}%{?with_vulkan_hw:,zink} \
 %else
   -Dgallium-drivers=swrast,virgl \
 %endif
   -Dgallium-vdpau=%{?with_vdpau:enabled}%{!?with_vdpau:disabled} \
-  -Dgallium-omx=%{?with_omx:bellagio}%{!?with_omx:disabled} \
   -Dgallium-va=%{?with_va:enabled}%{!?with_va:disabled} \
   -Dgallium-xa=%{?with_xa:enabled}%{!?with_xa:disabled} \
   -Dgallium-nine=%{?with_nine:true}%{!?with_nine:false} \
@@ -630,16 +613,13 @@ popd
 %files filesystem
 %doc docs/Mesa-MLAA-License-Clarification-Email.txt
 %dir %{_libdir}/dri
-%if 0%{?with_hardware}
-%if 0%{?with_vdpau}
-%dir %{_libdir}/vdpau
-%endif
-%endif
+%dir %{_datadir}/drirc.d
 
 %files libGL
 %{_libdir}/libGLX_mesa.so.0*
 %{_libdir}/libGLX_system.so.0*
 %files libGL-devel
+%dir %{_includedir}/GL
 %dir %{_includedir}/GL/internal
 %{_includedir}/GL/internal/dri_interface.h
 %{_libdir}/pkgconfig/dri.pc
@@ -719,9 +699,10 @@ popd
 %endif
 
 %files dri-drivers
-%dir %{_datadir}/drirc.d
 %{_datadir}/drirc.d/00-mesa-defaults.conf
+%{_libdir}/libgallium-*.so
 %{_libdir}/dri/kms_swrast_dri.so
+%{_libdir}/dri/libdril_dri.so
 %{_libdir}/dri/swrast_dri.so
 %{_libdir}/dri/virtio_gpu_dri.so
 
@@ -808,15 +789,11 @@ popd
 %{_libdir}/dri/sti_dri.so
 %{_libdir}/dri/sun4i-drm_dri.so
 %{_libdir}/dri/udl_dri.so
+%{_libdir}/dri/vkms_dri.so
 %{_libdir}/dri/zynqmp-dpsub_dri.so
 %endif
 %if 0%{?with_vulkan_hw}
 %{_libdir}/dri/zink_dri.so
-%endif
-
-%if 0%{?with_omx}
-%files omx-drivers
-%{_libdir}/bellagio/libomx_mesa.so
 %endif
 
 %if 0%{?with_va}
@@ -833,6 +810,7 @@ popd
 
 %if 0%{?with_vdpau}
 %files vdpau-drivers
+%dir %{_libdir}/vdpau
 %{_libdir}/vdpau/libvdpau_nouveau.so.1*
 %if 0%{?with_r600}
 %{_libdir}/vdpau/libvdpau_r600.so.1*
@@ -867,10 +845,36 @@ popd
 %{_datadir}/vulkan/icd.d/broadcom_icd.*.json
 %{_libdir}/libvulkan_freedreno.so
 %{_datadir}/vulkan/icd.d/freedreno_icd.*.json
+%{_libdir}/libvulkan_panfrost.so
+%{_datadir}/vulkan/icd.d/panfrost_icd.*.json
+%{_libdir}/libpowervr_rogue.so
+%{_libdir}/libvulkan_powervr_mesa.so
+%{_datadir}/vulkan/icd.d/powervr_mesa_icd.*.json
 %endif
 %endif
 
 %changelog
+* Thu Feb 13 2025 José Expósito <jexposit@redhat.com> - 24.2.8-2
+- AMD Navi4x support
+  Backport fixes for radeonsi and disable GFX12 on radv
+  Resolves: https://issues.redhat.com/browse/RHEL-53419
+
+* Thu Nov 28 2024 José Expósito <jexposit@redhat.com> - 24.2.8-1
+- Update to 24.2.8
+  Resolves: https://issues.redhat.com/browse/RHEL-53868
+
+* Tue Nov 19 2024 José Expósito <jexposit@redhat.com> - 24.2.7-1
+- Update to 24.2.7 and LLVM 19
+  Resolves: https://issues.redhat.com/browse/RHEL-66062
+
+* Thu Nov 14 2024 José Expósito <jexposit@redhat.com> - 24.2.6-2
+- Do not build aarch64 drivers on x86
+  Resolves: https://issues.redhat.com/browse/RHEL-66062
+
+* Tue Nov 12 2024 José Expósito <jexposit@redhat.com> - 24.2.6-1
+- Update to 24.2.6
+  Resolves: https://issues.redhat.com/browse/RHEL-66062
+
 * Mon Aug 26 2024 José Expósito <jexposit@redhat.com> - 24.1.2-3
 - Match mesa-libEGL version
   Cherry-picked from: https://src.fedoraproject.org/rpms/mesa/pull-request/24
