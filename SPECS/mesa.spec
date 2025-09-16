@@ -68,7 +68,7 @@ Name:           mesa
 Summary:        Mesa graphics libraries
 %global ver 24.2.8
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
-Release:        2%{?dist}
+Release:        3%{?dist}
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
 URL:            http://www.mesa3d.org
 
@@ -114,6 +114,11 @@ Patch10:        gnome-shell-glthread-disable.patch
 # Backport fixes for radeonsi and disable GFX12 on radv
 # https://issues.redhat.com/browse/RHEL-53419
 Patch11:        RHEL-53423.patch
+
+# Fix for firefox crash seen on NV dGFX
+# Backport fixes for firefox crash seen on NV dGFX
+# https://issues.redhat.com/browse/RHEL-107885
+Patch12:        32886.patch
 
 # Build our own version but keep the dependency for the RPM macros
 BuildRequires:  meson
@@ -854,6 +859,11 @@ popd
 %endif
 
 %changelog
+* Tue Aug 5 2025 Anusha Srivatsa <asrivats@redhat.com> - 24.2.8-3
+- NV dGFX fix for firefox crashing
+  Backport fixes for NV dGFX driver crashing firefox
+  Resolves: https://issues.redhat.com/browse/RHEL-107885
+
 * Thu Feb 13 2025 José Expósito <jexposit@redhat.com> - 24.2.8-2
 - AMD Navi4x support
   Backport fixes for radeonsi and disable GFX12 on radv
