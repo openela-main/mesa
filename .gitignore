@@ -1,5 +1,5 @@
-SOURCES/wayland-protocols-1.34.tar.xz
-SOURCES/libclc-19.1.1.src.tar.xz
-SOURCES/mesa-24.2.8.tar.xz
+SOURCES/mesa-25.0.7.tar.xz
 SOURCES/meson-1.3.0.tar.gz
-SOURCES/spirv-llvm-translator-90a9764.tar.gz
+SOURCES/spirv-llvm-translator-834db1a.tar.gz
+SOURCES/wayland-protocols-1.38.tar.xz
+SOURCES/libclc-20.1.3.src.tar.xz

@@ -1,0 +1,154 @@
+From ebf600843432f73a05a9848d60cecd219ca2e01f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marek=20Ol=C5=A1=C3=A1k?= <marek.olsak@amd.com>
+Date: Fri, 21 Feb 2025 01:14:39 -0500
+Subject: [PATCH] glx: don't call GL functions directly, use the current
+ dispatch instead
+
+With glvnd, GL functions will not be publicly exported from libGLX_mesa
+and we don't even need them privately defined.
+
+Reviewed-by: Adam Jackson <ajax@redhat.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33634>
+---
+ src/glx/drisw_glx.c |  6 ++++--
+ src/glx/meson.build |  2 +-
+ src/glx/xfont.c     | 46 +++++++++++++++++++++++----------------------
+ 3 files changed, 29 insertions(+), 25 deletions(-)
+
+diff --git a/src/glx/drisw_glx.c b/src/glx/drisw_glx.c
+index 45837a81f37..58cc0e7d09a 100644
+--- a/src/glx/drisw_glx.c
++++ b/src/glx/drisw_glx.c
+@@ -43,6 +43,8 @@
+ #include "kopper_interface.h"
+ #include "loader_dri_helper.h"
+ #include "dri_util.h"
++#include "mapi/glapi/glapi.h"
++#include "mesa/main/dispatch.h"
+ 
+ static int xshm_error = 0;
+ static int xshm_opcode = -1;
+@@ -540,7 +542,7 @@ driswSwapBuffers(__GLXDRIdrawable * pdraw,
+    (void) remainder;
+ 
+    if (flush) {
+-      glFlush();
++      CALL_Flush(GET_DISPATCH(), ());
+    }
+ 
+    if (psc->kopper)
+@@ -556,7 +558,7 @@ drisw_copy_sub_buffer(__GLXDRIdrawable * pdraw,
+                       int x, int y, int width, int height, Bool flush)
+ {
+    if (flush) {
+-      glFlush();
++      CALL_Flush(GET_DISPATCH(), ());
+    }
+ 
+    driswCopySubBuffer(pdraw->dri_drawable, x, y, width, height);
+diff --git a/src/glx/meson.build b/src/glx/meson.build
+index b52b91c5269..3315a7843fa 100644
+--- a/src/glx/meson.build
++++ b/src/glx/meson.build
+@@ -113,7 +113,7 @@ if with_platform_windows
+ endif
+ libglx = static_library(
+   'glx',
+-  [files_libglx, glx_generated],
++  [files_libglx, glx_generated, main_dispatch_h],
+   include_directories : [inc_include, inc_src, inc_glapi, inc_loader, inc_loader_x11,
+                          inc_gallium, inc_mesa, inc_st_dri, inc_gallium_aux],
+   c_args : [
+diff --git a/src/glx/xfont.c b/src/glx/xfont.c
+index d58b02f189a..f1ca7bba032 100644
+--- a/src/glx/xfont.c
++++ b/src/glx/xfont.c
+@@ -36,6 +36,8 @@
+ #ifdef GLX_DIRECT_RENDERING
+ 
+ #include "glxclient.h"
++#include "mapi/glapi/glapi.h"
++#include "mesa/main/dispatch.h"
+ 
+ /* Implementation.  */
+ 
+@@ -197,22 +199,22 @@ DRI_glXUseXFont(struct glx_context *CC, Font font, int first, int count, int lis
+ #endif
+ 
+    /* Save the current packing mode for bitmaps.  */
+-   glGetIntegerv(GL_UNPACK_SWAP_BYTES, &swapbytes);
+-   glGetIntegerv(GL_UNPACK_LSB_FIRST, &lsbfirst);
+-   glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowlength);
+-   glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skiprows);
+-   glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skippixels);
+-   glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
++   CALL_GetIntegerv(GET_DISPATCH(), (GL_UNPACK_SWAP_BYTES, &swapbytes));
++   CALL_GetIntegerv(GET_DISPATCH(), (GL_UNPACK_LSB_FIRST, &lsbfirst));
++   CALL_GetIntegerv(GET_DISPATCH(), (GL_UNPACK_ROW_LENGTH, &rowlength));
++   CALL_GetIntegerv(GET_DISPATCH(), (GL_UNPACK_SKIP_ROWS, &skiprows));
++   CALL_GetIntegerv(GET_DISPATCH(), (GL_UNPACK_SKIP_PIXELS, &skippixels));
++   CALL_GetIntegerv(GET_DISPATCH(), (GL_UNPACK_ALIGNMENT, &alignment));
+ 
+    /* Enforce a standard packing mode which is compatible with
+       fill_bitmap() from above.  This is actually the default mode,
+       except for the (non)alignment.  */
+-   glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
+-   glPixelStorei(GL_UNPACK_LSB_FIRST, GL_FALSE);
+-   glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+-   glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+-   glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+-   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_SWAP_BYTES, GL_FALSE));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_LSB_FIRST, GL_FALSE));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_ROW_LENGTH, 0));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_SKIP_ROWS, 0));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_SKIP_PIXELS, 0));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_ALIGNMENT, 1));
+ 
+    pixmap = XCreatePixmap(dpy, RootWindow(dpy, screen), 10, 10, 1);
+    values.foreground = BlackPixel(dpy, DefaultScreen(dpy));
+@@ -260,18 +262,18 @@ DRI_glXUseXFont(struct glx_context *CC, Font font, int first, int count, int lis
+       bm_width = (width + 7) / 8;
+       bm_height = height;
+ 
+-      glNewList(list, GL_COMPILE);
++      CALL_NewList(GET_DISPATCH(), (list, GL_COMPILE));
+       if (valid && (bm_width > 0) && (bm_height > 0)) {
+ 
+          memset(bm, '\0', bm_width * bm_height);
+          fill_bitmap(dpy, screen, gc, bm_width, bm_height, x, y, c, bm);
+ 
+-         glBitmap(width, height, x0, y0, dx, dy, bm);
++         CALL_Bitmap(GET_DISPATCH(), (width, height, x0, y0, dx, dy, bm));
+          }
+       else {
+-         glBitmap(0, 0, 0.0, 0.0, dx, dy, NULL);
++         CALL_Bitmap(GET_DISPATCH(), (0, 0, 0.0, 0.0, dx, dy, NULL));
+       }
+-      glEndList();
++      CALL_EndList(GET_DISPATCH(), ());
+    }
+ 
+    free(bm);
+@@ -279,12 +281,12 @@ DRI_glXUseXFont(struct glx_context *CC, Font font, int first, int count, int lis
+    XFreeGC(dpy, gc);
+ 
+    /* Restore saved packing modes.  */
+-   glPixelStorei(GL_UNPACK_SWAP_BYTES, swapbytes);
+-   glPixelStorei(GL_UNPACK_LSB_FIRST, lsbfirst);
+-   glPixelStorei(GL_UNPACK_ROW_LENGTH, rowlength);
+-   glPixelStorei(GL_UNPACK_SKIP_ROWS, skiprows);
+-   glPixelStorei(GL_UNPACK_SKIP_PIXELS, skippixels);
+-   glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_SWAP_BYTES, swapbytes));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_LSB_FIRST, lsbfirst));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_ROW_LENGTH, rowlength));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_SKIP_ROWS, skiprows));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_SKIP_PIXELS, skippixels));
++   CALL_PixelStorei(GET_DISPATCH(), (GL_UNPACK_ALIGNMENT, alignment));
+ }
+ 
+ #endif
+-- 
+2.51.0
+

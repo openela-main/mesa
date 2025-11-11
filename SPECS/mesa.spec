@@ -66,7 +66,7 @@
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-%global ver 24.2.8
+%global ver 25.0.7
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
 Release:        3%{?dist}
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
@@ -84,7 +84,7 @@ Source2: https://github.com/mesonbuild/meson/releases/download/%{meson_ver}/meso
 
 # libclc is not available in RHEL but it is required for Intel drivers since
 # mesa >= 24.1.0
-%global libclc_version 19.1.1
+%global libclc_version 20.1.3
 Source3: https://github.com/llvm/llvm-project/releases/download/llvmorg-%{libclc_version}/libclc-%{libclc_version}.src.tar.xz
 BuildRequires:  libedit-devel
 BuildRequires:  clang-devel >= %{libclc_version}
@@ -92,8 +92,8 @@ BuildRequires:  clang-devel >= %{libclc_version}
 # BuildRequires:  spirv-llvm-translator-tools
 
 # spirv-llvm-translator is a dependency of libclc
-%global spirv_llvm_trans_ver 19.1.1
-%global spirv_llvm_trans_commit 90a976491d3847657396456e0e94d7dc48d35996
+%global spirv_llvm_trans_ver 20.1.0
+%global spirv_llvm_trans_commit 834db1a1985ac36d5a3e1b4b34dc1ca3f919ad5b
 %global spirv_llvm_trans_shortcommit %(c=%{spirv_llvm_trans_commit}; echo ${c:0:7})
 Source4: https://github.com/KhronosGroup/SPIRV-LLVM-Translator/archive/%{spirv_llvm_trans_commit}/spirv-llvm-translator-%{spirv_llvm_trans_shortcommit}.tar.gz
 BuildRequires:  cmake
@@ -103,22 +103,29 @@ BuildRequires:  spirv-headers-devel
 BuildRequires:  spirv-tools-devel
 BuildRequires:  zlib-devel
 
-# wayland-protocols >= 1.34 is required
-%global wayland_protocols_ver 1.34
+# wayland-protocols >= 1.38 is required
+%global wayland_protocols_ver 1.38
 Source5:        https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/%{wayland_protocols_ver}/downloads/wayland-protocols-%{wayland_protocols_ver}.tar.xz
 BuildRequires:  wayland-devel
 
 Patch10:        gnome-shell-glthread-disable.patch
 
-# AMD Navi4x support:
-# Backport fixes for radeonsi and disable GFX12 on radv
-# https://issues.redhat.com/browse/RHEL-53419
-Patch11:        RHEL-53423.patch
+# Backport of https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33805
+# to fix clover with libclc from LLVM 20.
+Patch20:        e4eb5e80c316c0af3fff310ca89e1175d81556c1.patch
 
-# Fix for firefox crash seen on NV dGFX
-# Backport fixes for firefox crash seen on NV dGFX
-# https://issues.redhat.com/browse/RHEL-107885
-Patch12:        32886.patch
+# This patch makes Fedora CI fail and causes issues in QEMU. Revert it until
+# we find a fix.
+# https://bugzilla.redhat.com/show_bug.cgi?id=2360851
+# https://gitlab.freedesktop.org/mesa/mesa/-/issues/13009
+Patch40:        0001-Revert-kopper-Explicitly-choose-zink.patch
+
+# Upstream revert for gtk corruption on haswell
+Patch50:	0001-Revert-hasvk-elk-stop-turning-load_push_constants-in.patch
+
+# Black screen on ppc64le:
+# Fix direct gl calls
+Patch12:	0001-glx-don-t-call-GL-functions-directly-use-the-current.patch
 
 # Build our own version but keep the dependency for the RPM macros
 BuildRequires:  meson
@@ -131,7 +138,7 @@ BuildRequires:  kernel-headers
 # We only check for the minimum version of pkgconfig(libdrm) needed so that the
 # SRPMs for each arch still have the same build dependencies. See:
 # https://bugzilla.redhat.com/show_bug.cgi?id=1859515
-BuildRequires:  pkgconfig(libdrm) >= 2.4.121
+BuildRequires:  pkgconfig(libdrm) >= 2.4.122
 %if 0%{?with_libunwind}
 BuildRequires:  pkgconfig(libunwind)
 %endif
@@ -141,7 +148,7 @@ BuildRequires:  pkgconfig(libzstd)
 BuildRequires:  pkgconfig(libselinux)
 BuildRequires:  pkgconfig(wayland-scanner)
 # Build our own version
-# BuildRequires:  pkgconfig(wayland-protocols) >= 1.34
+# BuildRequires:  pkgconfig(wayland-protocols) >= 1.38
 BuildRequires:  pkgconfig(wayland-client) >= 1.11
 BuildRequires:  pkgconfig(wayland-server) >= 1.11
 BuildRequires:  pkgconfig(wayland-egl-backend) >= 3
@@ -230,16 +237,15 @@ Obsoletes:      mesa-omx-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
 
 %package libGL
 Summary:        Mesa libGL runtime libraries
-Requires:       %{name}-libglapi%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 Requires:       libglvnd-glx%{?_isa} >= 1:1.3.2
-Recommends:     %{name}-dri-drivers%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
+Requires:       %{name}-dri-drivers%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description libGL
 %{summary}.
 
 %package libGL-devel
 Summary:        Mesa libGL development package
-Requires:       %{name}-libGL%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
+Requires:       (%{name}-libGL%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release} if %{name}-libGL%{?_isa})
 Requires:       libglvnd-devel%{?_isa} >= 1:1.3.2
 Provides:       libGL-devel
 Provides:       libGL-devel%{?_isa}
@@ -252,15 +258,14 @@ Recommends:     gl-manpages
 Summary:        Mesa libEGL runtime libraries
 Requires:       libglvnd-egl%{?_isa} >= 1:1.3.2
 Requires:       %{name}-libgbm%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-Requires:       %{name}-libglapi%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-Recommends:     %{name}-dri-drivers%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
+Requires:       %{name}-dri-drivers%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description libEGL
 %{summary}.
 
 %package libEGL-devel
 Summary:        Mesa libEGL development package
-Requires:       %{name}-libEGL%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
+Requires:       (%{name}-libEGL%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release} if %{name}-libEGL%{?_isa})
 Requires:       libglvnd-devel%{?_isa} >= 1:1.3.2
 Requires:       %{name}-khr-devel%{?_isa}
 Provides:       libEGL-devel
@@ -272,10 +277,11 @@ Provides:       libEGL-devel%{?_isa}
 %package dri-drivers
 Summary:        Mesa-based DRI drivers
 Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-Requires:       %{name}-libglapi%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 %if 0%{?with_va}
 Recommends:     %{name}-va-drivers%{?_isa}
 %endif
+Obsoletes:      %{name}-libglapi < 25.0.0~rc2-1
+Provides:       %{name}-libglapi >= 25.0.0~rc2-1
 # If mesa-libEGL is installed, it must match in version. This is here to prevent using
 # mesa-libEGL < 23.0.3-1 (frozen in the 'fedora' repo) which didn't have strong enough
 # inter-dependencies. See https://bugzilla.redhat.com/show_bug.cgi?id=2193135 .
@@ -305,7 +311,6 @@ Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{rel
 
 %package libOSMesa
 Summary:        Mesa offscreen rendering libraries
-Requires:       %{name}-libglapi%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 Provides:       libOSMesa
 Provides:       libOSMesa%{?_isa}
 
@@ -360,22 +365,10 @@ Provides:       libxatracker-devel%{?_isa}
 %{summary}.
 %endif
 
-%package libglapi
-Summary:        Mesa shared glapi
-Provides:       libglapi
-Provides:       libglapi%{?_isa}
-# If mesa-dri-drivers are installed, they must match in version. This is here to prevent using
-# older mesa-dri-drivers together with a newer mesa-libglapi or its dependants.
-# See https://bugzilla.redhat.com/show_bug.cgi?id=2193135 .
-Requires:       (%{name}-dri-drivers%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release} if %{name}-dri-drivers%{?_isa})
-
-%description libglapi
-%{summary}.
-
 %if 0%{?with_opencl}
 %package libOpenCL
 Summary:        Mesa OpenCL runtime library
-Requires:       ocl-icd%{?_isa}
+Requires:       (ocl-icd%{?_isa} or OpenCL-ICD-Loader%{?_isa})
 Requires:       libclc%{?_isa}
 Requires:       %{name}-libgbm%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 Requires:       opencl-filesystem
@@ -487,7 +480,7 @@ sed -e "s!libexecdir=!libexecdir=\/%{buildroot}!" -i %{buildroot}%{_libdir}/pkgc
 
 # Build wayland-protocols
 cd wayland-protocols-%{wayland_protocols_ver}
-%meson --prefix=%{buildroot}
+%meson --prefix=%{buildroot} -Dtests=false
 %meson_build
 %meson_install
 cd -
@@ -515,12 +508,11 @@ export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
 
 %meson \
   -Dplatforms=x11,wayland \
-  -Ddri3=enabled \
   -Dosmesa=true \
 %if 0%{?with_hardware}
-  -Dgallium-drivers=swrast,virgl,nouveau%{?with_r300:,r300}%{?with_crocus:,crocus}%{?with_iris:,iris}%{?with_vmware:,svga}%{?with_radeonsi:,radeonsi}%{?with_r600:,r600}%{?with_freedreno:,freedreno}%{?with_etnaviv:,etnaviv}%{?with_tegra:,tegra}%{?with_vc4:,vc4}%{?with_v3d:,v3d}%{?with_lima:,lima}%{?with_panfrost:,panfrost}%{?with_vulkan_hw:,zink} \
+  -Dgallium-drivers=llvmpipe,virgl,nouveau%{?with_r300:,r300}%{?with_crocus:,crocus}%{?with_i915:,i915}%{?with_iris:,iris}%{?with_vmware:,svga}%{?with_radeonsi:,radeonsi}%{?with_r600:,r600}%{?with_freedreno:,freedreno}%{?with_etnaviv:,etnaviv}%{?with_tegra:,tegra}%{?with_vc4:,vc4}%{?with_v3d:,v3d}%{?with_lima:,lima}%{?with_panfrost:,panfrost}%{?with_vulkan_hw:,zink} \
 %else
-  -Dgallium-drivers=swrast,virgl \
+  -Dgallium-drivers=llvmpipe,virgl \
 %endif
   -Dgallium-vdpau=%{?with_vdpau:enabled}%{!?with_vdpau:disabled} \
   -Dgallium-va=%{?with_va:enabled}%{!?with_va:disabled} \
@@ -628,7 +620,6 @@ popd
 %dir %{_includedir}/GL/internal
 %{_includedir}/GL/internal/dri_interface.h
 %{_libdir}/pkgconfig/dri.pc
-%{_libdir}/libglapi.so
 
 %files libEGL
 %{_datadir}/glvnd/egl_vendor.d/50_mesa.json
@@ -637,10 +628,6 @@ popd
 %dir %{_includedir}/EGL
 %{_includedir}/EGL/eglext_angle.h
 %{_includedir}/EGL/eglmesaext.h
-
-%files libglapi
-%{_libdir}/libglapi.so.0
-%{_libdir}/libglapi.so.0.*
 
 %files libOSMesa
 %{_libdir}/libOSMesa.so.8*
@@ -706,6 +693,7 @@ popd
 %files dri-drivers
 %{_datadir}/drirc.d/00-mesa-defaults.conf
 %{_libdir}/libgallium-*.so
+%{_libdir}/gbm/dri_gbm.so
 %{_libdir}/dri/kms_swrast_dri.so
 %{_libdir}/dri/libdril_dri.so
 %{_libdir}/dri/swrast_dri.so
@@ -859,10 +847,18 @@ popd
 %endif
 
 %changelog
-* Tue Aug 5 2025 Anusha Srivatsa <asrivats@redhat.com> - 24.2.8-3
+* Thu Sep 18 2025 Jocelyn Falempe <jfalempe@redhat.com> - 25.0.7-3
+- Fix black screen on ppc64le
+  Resolves: https://issues.redhat.com/browse/RHEL-113831
+
+* Wed Jul 16 2025 Anusha Srivatsa <asrivats@redhat.com> - 25.0.7-2
 - NV dGFX fix for firefox crashing
   Backport fixes for NV dGFX driver crashing firefox
-  Resolves: https://issues.redhat.com/browse/RHEL-107885
+  Resolves: https://issues.redhat.com/browse/RHEL-93219
+
+* Wed Jun 18 2025 José Expósito <jexposit@redhat.com> - 25.0.7-1
+* Update to 25.0.7
+  Resolves: https://issues.redhat.com/browse/RHEL-75954
 
 * Thu Feb 13 2025 José Expósito <jexposit@redhat.com> - 24.2.8-2
 - AMD Navi4x support
