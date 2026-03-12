@@ -68,7 +68,7 @@ Name:           mesa
 Summary:        Mesa graphics libraries
 %global ver 25.0.7
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
-Release:        4%{?dist}
+Release:        5%{?dist}
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
 URL:            http://www.mesa3d.org
 
@@ -130,6 +130,10 @@ Patch12:	0001-glx-don-t-call-GL-functions-directly-use-the-current.patch
 # Fix performance issue with Xorg
 Patch60:	0001-drisw-Modify-drisw_swap_buffers_with_damage-to-swap-.patch
 Patch61:	0002-Revert-drisw-Copy-entire-buffer-ignoring-damage-regi.patch
+
+# Fix HOME directory being part of NFS
+# https://issues.redhat.com/browse/RHEL-110665
+Patch70:	0001-util-disk_cache-Re-enable-multi-file-cache-by-defaul.patch
 
 # Build our own version but keep the dependency for the RPM macros
 BuildRequires:  meson
@@ -851,6 +855,9 @@ popd
 %endif
 
 %changelog
+* Mon Feb 23 2026 Anusha Srivatsa <asrivats@redhat.com> - 25.0.7-5
+- Resolves: https://issues.redhat.com/browse/RHEL-151404
+
 * Tue Jan 6 2026 Jocelyn Falempe <jfalempe@redhat.com - 25.0.7-4
 - Resolves: https://issues.redhat.com/browse/RHEL-138704
 
