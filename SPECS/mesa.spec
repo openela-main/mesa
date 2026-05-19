@@ -4,15 +4,14 @@
 %global with_vmware 1
 %global with_vulkan_hw 1
 %global with_vdpau 1
-%global with_va 1
 %if !0%{?rhel}
 %global with_r300 1
 %global with_r600 1
-%global with_nine 1
-%if 0%{?with_vulkan_hw}
-%global with_nvk %{with_vulkan_hw}
-%endif
 %global with_opencl 1
+%global with_va 1
+%endif
+%if !0%{?rhel} || 0%{?rhel} >= 9
+%global with_nvk %{with_vulkan_hw}
 %endif
 %global base_vulkan %{?with_vulkan_hw:,amd}%{!?with_vulkan_hw:%{nil}}
 %endif
@@ -24,11 +23,12 @@
 %endif
 
 %ifarch %{ix86} x86_64
-%global with_iris   1
 %global with_crocus 1
-%global with_xa     1
-%global with_intel_clc 1
+%global with_iris   1
 %global intel_platform_vulkan %{?with_vulkan_hw:,intel,intel_hasvk}%{!?with_vulkan_hw:%{nil}}
+%if !0%{?rhel}
+%global with_i915   1
+%endif
 %endif
 %ifarch x86_64
 %if !0%{?with_vulkan_hw}
@@ -38,6 +38,8 @@
 
 %ifarch %{arm} aarch64
 %if !0%{?rhel}
+%global with_asahi     1
+%global with_d3d12     1
 %global with_etnaviv   1
 %global with_lima      1
 %global with_tegra     1
@@ -47,13 +49,16 @@
 %global with_freedreno 1
 %global with_kmsro     1
 %global with_panfrost  1
-%global with_xa        1
+%if 0%{?with_asahi}
+%global asahi_platform_vulkan %{?with_vulkan_hw:,asahi}%{!?with_vulkan_hw:%{nil}}
+%endif
 %global extra_platform_vulkan %{?with_vulkan_hw:,broadcom,freedreno,panfrost,imagination-experimental}%{!?with_vulkan_hw:%{nil}}
 %endif
 
 %if !0%{?rhel}
 %global with_libunwind 1
 %global with_lmsensors 1
+%global with_virtio    1
 %endif
 
 %ifarch %{valgrind_arches}
@@ -62,13 +67,22 @@
 %bcond_with valgrind
 %endif
 
-%global vulkan_drivers swrast%{?base_vulkan}%{?intel_platform_vulkan}%{?extra_platform_vulkan}%{?with_nvk:,nouveau}
+%global vulkan_drivers swrast%{?base_vulkan}%{?intel_platform_vulkan}%{?asahi_platform_vulkan}%{?extra_platform_vulkan}%{?with_nvk:,nouveau}%{?with_virtio:,virtio}%{?with_d3d12:,microsoft-experimental}
+
+%if 0%{?with_nvk} && 0%{?rhel}
+%global vendor_nvk_crates 1
+%endif
+
+# We've gotten a report that enabling LTO for mesa breaks some games. See
+# https://bugzilla.redhat.com/show_bug.cgi?id=1862771 for details.
+# Disable LTO for now
+%global _lto_cflags %nil
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-%global ver 25.0.7
+%global ver 25.2.7
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
-Release:        5%{?dist}
+Release:        4%{?dist}
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
 URL:            http://www.mesa3d.org
 
@@ -78,13 +92,14 @@ Source0:        https://archive.mesa3d.org/mesa-%{ver}.tar.xz
 # Fedora opts to ignore the optional part of clause 2 and treat that code as 2 clause BSD.
 Source1:        Mesa-MLAA-License-Clarification-Email.txt
 
-# meson >= 1.3.0 is required
-%global meson_ver 1.3.0
+# meson >= 1.7.0 is required
+%global meson_ver 1.7.0
 Source2: https://github.com/mesonbuild/meson/releases/download/%{meson_ver}/meson-%{meson_ver}.tar.gz
+
 
 # libclc is not available in RHEL but it is required for Intel drivers since
 # mesa >= 24.1.0
-%global libclc_version 20.1.3
+%global libclc_version 21.1.3
 Source3: https://github.com/llvm/llvm-project/releases/download/llvmorg-%{libclc_version}/libclc-%{libclc_version}.src.tar.xz
 BuildRequires:  libedit-devel
 BuildRequires:  clang-devel >= %{libclc_version}
@@ -92,8 +107,8 @@ BuildRequires:  clang-devel >= %{libclc_version}
 # BuildRequires:  spirv-llvm-translator-tools
 
 # spirv-llvm-translator is a dependency of libclc
-%global spirv_llvm_trans_ver 20.1.0
-%global spirv_llvm_trans_commit 834db1a1985ac36d5a3e1b4b34dc1ca3f919ad5b
+%global spirv_llvm_trans_ver 21.1.2
+%global spirv_llvm_trans_commit a37544fc0bb90b4e8b8d755580119c018891dfa4
 %global spirv_llvm_trans_shortcommit %(c=%{spirv_llvm_trans_commit}; echo ${c:0:7})
 Source4: https://github.com/KhronosGroup/SPIRV-LLVM-Translator/archive/%{spirv_llvm_trans_commit}/spirv-llvm-translator-%{spirv_llvm_trans_shortcommit}.tar.gz
 BuildRequires:  cmake
@@ -103,45 +118,48 @@ BuildRequires:  spirv-headers-devel
 BuildRequires:  spirv-tools-devel
 BuildRequires:  zlib-devel
 
-# wayland-protocols >= 1.38 is required
-%global wayland_protocols_ver 1.38
+# wayland-protocols >= 1.41 is required
+%global wayland_protocols_ver 1.41
 Source5:        https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/%{wayland_protocols_ver}/downloads/wayland-protocols-%{wayland_protocols_ver}.tar.xz
 BuildRequires:  wayland-devel
 
-Patch10:        gnome-shell-glthread-disable.patch
+# In CentOS/RHEL, Rust crates required to build NVK are vendored.
+# The minimum target versions are obtained from the .wrap files
+# https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/subprojects
+# but we generally want the latest compatible versions
+%global rust_paste_ver 1.0.15
+%global rust_proc_macro2_ver 1.0.101
+%global rust_quote_ver 1.0.40
+%global rust_syn_ver 2.0.106
+%global rust_unicode_ident_ver 1.0.18
+%global rustc_hash_ver 2.1.1
+Source10:       https://crates.io/api/v1/crates/paste/%{rust_paste_ver}/download#/paste-%{rust_paste_ver}.tar.gz
+Source11:       https://crates.io/api/v1/crates/proc-macro2/%{rust_proc_macro2_ver}/download#/proc-macro2-%{rust_proc_macro2_ver}.tar.gz
+Source12:       https://crates.io/api/v1/crates/quote/%{rust_quote_ver}/download#/quote-%{rust_quote_ver}.tar.gz
+Source13:       https://crates.io/api/v1/crates/syn/%{rust_syn_ver}/download#/syn-%{rust_syn_ver}.tar.gz
+Source14:       https://crates.io/api/v1/crates/unicode-ident/%{rust_unicode_ident_ver}/download#/unicode-ident-%{rust_unicode_ident_ver}.tar.gz
+Source15:       https://crates.io/api/v1/crates/rustc-hash/%{rustc_hash_ver}/download#/rustc-hash-%{rustc_hash_ver}.tar.gz
 
-# Backport of https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33805
-# to fix clover with libclc from LLVM 20.
-Patch20:        e4eb5e80c316c0af3fff310ca89e1175d81556c1.patch
+# fix zink/device-select bug
+Patch11:        0001-device-select-add-a-layer-setting-to-disable-device-.patch
+Patch12:        0002-zink-use-device-select-layer-settings-to-disable-dev.patch
 
-# This patch makes Fedora CI fail and causes issues in QEMU. Revert it until
-# we find a fix.
-# https://bugzilla.redhat.com/show_bug.cgi?id=2360851
-# https://gitlab.freedesktop.org/mesa/mesa/-/issues/13009
-Patch40:        0001-Revert-kopper-Explicitly-choose-zink.patch
-
-# Upstream revert for gtk corruption on haswell
-Patch50:	0001-Revert-hasvk-elk-stop-turning-load_push_constants-in.patch
-
-# Black screen on ppc64le:
-# Fix direct gl calls
-Patch12:	0001-glx-don-t-call-GL-functions-directly-use-the-current.patch
+# Fix s390x regressions:
+# https://issues.redhat.com/browse/RHEL-151315
+Patch13:        0001-gallivm-handle-u16-correct-on-const-loads.patch
+Patch14:        0001-Revert-dri-fix-__DRI_IMAGE_FORMAT-to-PIPE_FORMAT-map.patch
 
 # Fix performance issue with Xorg
-Patch60:	0001-drisw-Modify-drisw_swap_buffers_with_damage-to-swap-.patch
-Patch61:	0002-Revert-drisw-Copy-entire-buffer-ignoring-damage-regi.patch
+Patch21:	0001-drisw-Modify-drisw_swap_buffers_with_damage-to-swap-.patch
+Patch22:	0002-Revert-drisw-Copy-entire-buffer-ignoring-damage-regi.patch
 
-# Fix HOME directory being part of NFS
-# https://issues.redhat.com/browse/RHEL-110665
-Patch70:	0001-util-disk_cache-Re-enable-multi-file-cache-by-defaul.patch
-
-# Build our own version but keep the dependency for the RPM macros
 BuildRequires:  meson
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  gettext
 %if 0%{?with_hardware}
 BuildRequires:  kernel-headers
+BuildRequires:  systemd-devel
 %endif
 # We only check for the minimum version of pkgconfig(libdrm) needed so that the
 # SRPMs for each arch still have the same build dependencies. See:
@@ -153,10 +171,9 @@ BuildRequires:  pkgconfig(libunwind)
 BuildRequires:  pkgconfig(expat)
 BuildRequires:  pkgconfig(zlib) >= 1.2.3
 BuildRequires:  pkgconfig(libzstd)
-BuildRequires:  pkgconfig(libselinux)
 BuildRequires:  pkgconfig(wayland-scanner)
 # Build our own version
-# BuildRequires:  pkgconfig(wayland-protocols) >= 1.38
+#BuildRequires:  pkgconfig(wayland-protocols) >= 1.34
 BuildRequires:  pkgconfig(wayland-client) >= 1.11
 BuildRequires:  pkgconfig(wayland-server) >= 1.11
 BuildRequires:  pkgconfig(wayland-egl-backend) >= 3
@@ -197,7 +214,7 @@ BuildRequires:  flatbuffers-devel
 BuildRequires:  flatbuffers-compiler
 BuildRequires:  xtensor-devel
 %endif
-%if 0%{?with_opencl} || 0%{?with_nvk} || 0%{?with_intel_clc}
+%if 0%{?with_opencl} || 0%{?with_nvk} || 0%{?with_asahi} || 0%{?with_panfrost}
 BuildRequires:  clang-devel
 # Build our own version
 # BuildRequires:  pkgconfig(libclc)
@@ -206,30 +223,29 @@ BuildRequires:  pkgconfig(SPIRV-Tools)
 %endif
 %if 0%{?with_opencl} || 0%{?with_nvk}
 BuildRequires:  bindgen
-BuildRequires:  rust-packaging
+%if 0%{?rhel}
+BuildRequires:  rust-toolset
+%else
+BuildRequires:  cargo-rpm-macros
+%endif
 %endif
 %if 0%{?with_nvk}
 BuildRequires:  cbindgen
-BuildRequires:  (crate(paste) >= 1.0.14 with crate(paste) < 2)
-BuildRequires:  (crate(proc-macro2) >= 1.0.56 with crate(proc-macro2) < 2)
-BuildRequires:  (crate(quote) >= 1.0.25 with crate(quote) < 2)
-BuildRequires:  (crate(syn/clone-impls) >= 2.0.15 with crate(syn/clone-impls) < 3)
-BuildRequires:  (crate(unicode-ident) >= 1.0.6 with crate(unicode-ident) < 2)
 %endif
 %if %{with valgrind}
 BuildRequires:  pkgconfig(valgrind)
 %endif
 BuildRequires:  python3-devel
 BuildRequires:  python3-mako
-%if 0%{?with_intel_clc}
-BuildRequires:  python3-ply
-%endif
 BuildRequires:  python3-pycparser
 BuildRequires:  python3-pyyaml
 BuildRequires:  vulkan-headers
 BuildRequires:  glslang
 %if 0%{?with_vulkan_hw}
 BuildRequires:  pkgconfig(vulkan)
+%endif
+%if 0%{?with_d3d12}
+BuildRequires:  pkgconfig(DirectX-Headers) >= 1.614.1
 %endif
 
 %description
@@ -239,6 +255,8 @@ BuildRequires:  pkgconfig(vulkan)
 Summary:        Mesa driver filesystem
 Provides:       mesa-dri-filesystem = %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-omx-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
+Obsoletes:      mesa-libd3d < %{?epoch:%{epoch}:}%{version}-%{release}
+Obsoletes:      mesa-libd3d-devel < %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description filesystem
 %{summary}.
@@ -247,6 +265,7 @@ Obsoletes:      mesa-omx-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
 Summary:        Mesa libGL runtime libraries
 Requires:       libglvnd-glx%{?_isa} >= 1:1.3.2
 Requires:       %{name}-dri-drivers%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
+Obsoletes:      %{name}-libOSMesa < 25.1.0~rc2-1
 
 %description libGL
 %{summary}.
@@ -258,6 +277,7 @@ Requires:       libglvnd-devel%{?_isa} >= 1:1.3.2
 Provides:       libGL-devel
 Provides:       libGL-devel%{?_isa}
 Recommends:     gl-manpages
+Obsoletes:      %{name}-libOSMesa-devel < 25.1.0~rc2-1
 
 %description libGL-devel
 %{summary}.
@@ -290,10 +310,12 @@ Recommends:     %{name}-va-drivers%{?_isa}
 %endif
 Obsoletes:      %{name}-libglapi < 25.0.0~rc2-1
 Provides:       %{name}-libglapi >= 25.0.0~rc2-1
+
 # If mesa-libEGL is installed, it must match in version. This is here to prevent using
 # mesa-libEGL < 23.0.3-1 (frozen in the 'fedora' repo) which didn't have strong enough
 # inter-dependencies. See https://bugzilla.redhat.com/show_bug.cgi?id=2193135 .
 Requires:       (%{name}-libEGL%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release} if %{name}-libEGL%{?_isa})
+
 
 %description dri-drivers
 %{summary}.
@@ -317,21 +339,6 @@ Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{rel
 %{summary}.
 %endif
 
-%package libOSMesa
-Summary:        Mesa offscreen rendering libraries
-Provides:       libOSMesa
-Provides:       libOSMesa%{?_isa}
-
-%description libOSMesa
-%{summary}.
-
-%package libOSMesa-devel
-Summary:        Mesa offscreen rendering development package
-Requires:       %{name}-libOSMesa%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-
-%description libOSMesa-devel
-%{summary}.
-
 %package libgbm
 Summary:        Mesa gbm runtime library
 Provides:       libgbm
@@ -353,25 +360,6 @@ Provides:       libgbm-devel%{?_isa}
 
 %description libgbm-devel
 %{summary}.
-
-%if 0%{?with_xa}
-%package libxatracker
-Summary:        Mesa XA state tracker
-Provides:       libxatracker
-Provides:       libxatracker%{?_isa}
-
-%description libxatracker
-%{summary}.
-
-%package libxatracker-devel
-Summary:        Mesa XA state tracker development package
-Requires:       %{name}-libxatracker%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-Provides:       libxatracker-devel
-Provides:       libxatracker-devel%{?_isa}
-
-%description libxatracker-devel
-%{summary}.
-%endif
 
 %if 0%{?with_opencl}
 %package libOpenCL
@@ -400,19 +388,13 @@ Summary:        Mesa TensorFlow Lite delegate
 %{summary}.
 %endif
 
-%if 0%{?with_nine}
-%package libd3d
-Summary:        Mesa Direct3D9 state tracker
+%if 0%{?with_d3d12}
+%package dxil-devel
+Summary:        Mesa SPIR-V to DXIL binary
+Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
 
-%description libd3d
-%{summary}.
-
-%package libd3d-devel
-Summary:        Mesa Direct3D9 state tracker development package
-Requires:       %{name}-libd3d%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-
-%description libd3d-devel
-%{summary}.
+%description dxil-devel
+Development tools for translating SPIR-V shader code to DXIL for Direct3D 12
 %endif
 
 %package vulkan-drivers
@@ -440,7 +422,49 @@ tar -xvf %{SOURCE4}
 # Extract wayland-protocols
 tar -xvf %{SOURCE5}
 
+# Extract Rust crates meson cache directory
+%if 0%{?vendor_nvk_crates}
+mkdir subprojects/packagecache/
+tar -xvf %{SOURCE10} -C subprojects/packagecache/
+tar -xvf %{SOURCE11} -C subprojects/packagecache/
+tar -xvf %{SOURCE12} -C subprojects/packagecache/
+tar -xvf %{SOURCE13} -C subprojects/packagecache/
+tar -xvf %{SOURCE14} -C subprojects/packagecache/
+tar -xvf %{SOURCE15} -C subprojects/packagecache/
+for d in subprojects/packagecache/*-*; do
+    echo '{"files":{}}' > $d/.cargo-checksum.json
+done
+%endif
+
+%if 0%{?with_nvk}
+cat > Cargo.toml <<_EOF
+[package]
+name = "mesa"
+version = "%{version}"
+edition = "2021"
+
+[lib]
+path = "src/nouveau/nil/lib.rs"
+
+# only direct dependencies need to be listed here
+[dependencies]
+paste = "$(grep ^directory subprojects/paste.wrap | sed 's|.*-||')"
+syn = { version = "$(grep ^directory subprojects/syn.wrap | sed 's|.*-||')", features = ["clone-impls"] }
+rustc-hash = "$(grep ^directory subprojects/rustc-hash.wrap | sed 's|.*-||')"
+_EOF
+%if 0%{?vendor_nvk_crates}
+%cargo_prep -v subprojects/packagecache
+%else
+%cargo_prep
+
+%generate_buildrequires
+%cargo_generate_buildrequires
+%endif
+%endif
+
+
 %build
+
 # Build meson
 cd meson-%{meson_ver}
 %py3_build
@@ -448,6 +472,7 @@ cd meson-%{meson_ver}
 %global __meson %{buildroot}%{_bindir}/meson
 export PYTHONPATH=%{buildroot}%{python3_sitelib}:%{python3_sitelib}
 cd -
+
 
 # Build spirv-llvm-translator
 cd SPIRV-LLVM-Translator-%{spirv_llvm_trans_commit}
@@ -493,47 +518,43 @@ cd wayland-protocols-%{wayland_protocols_ver}
 %meson_install
 cd -
 
+
 # ensure standard Rust compiler flags are set
 export RUSTFLAGS="%build_rustflags"
 
 %if 0%{?with_nvk}
-export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
 # So... Meson can't actually find them without tweaks
-%define inst_crate_nameversion() %(basename %{cargo_registry}/%{1}-*)
-%define rewrite_wrap_file() sed -e "/source.*/d" -e "s/%{1}-.*/%{inst_crate_nameversion %{1}}/" -i subprojects/%{1}.wrap
-
-%rewrite_wrap_file proc-macro2
-%rewrite_wrap_file quote
-%rewrite_wrap_file syn
-%rewrite_wrap_file unicode-ident
-%rewrite_wrap_file paste
+%if !0%{?vendor_nvk_crates}
+export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
 %endif
+rewrite_wrap_file() {
+   sed -e "/source.*/d" -e "s/${1}-.*/$(basename ${MESON_PACKAGE_CACHE_DIR:-subprojects/packagecache}/${1}-*)/" -i subprojects/${1}.wrap
+}
 
-# We've gotten a report that enabling LTO for mesa breaks some games. See
-# https://bugzilla.redhat.com/show_bug.cgi?id=1862771 for details.
-# Disable LTO for now
-%define _lto_cflags %{nil}
+rewrite_wrap_file proc-macro2
+rewrite_wrap_file quote
+rewrite_wrap_file syn
+rewrite_wrap_file unicode-ident
+rewrite_wrap_file paste
+rewrite_wrap_file rustc-hash
+%endif
 
 %meson \
   -Dplatforms=x11,wayland \
-  -Dosmesa=true \
 %if 0%{?with_hardware}
-  -Dgallium-drivers=llvmpipe,virgl,nouveau%{?with_r300:,r300}%{?with_crocus:,crocus}%{?with_i915:,i915}%{?with_iris:,iris}%{?with_vmware:,svga}%{?with_radeonsi:,radeonsi}%{?with_r600:,r600}%{?with_freedreno:,freedreno}%{?with_etnaviv:,etnaviv}%{?with_tegra:,tegra}%{?with_vc4:,vc4}%{?with_v3d:,v3d}%{?with_lima:,lima}%{?with_panfrost:,panfrost}%{?with_vulkan_hw:,zink} \
+  -Dgallium-drivers=llvmpipe,virgl,nouveau%{?with_r300:,r300}%{?with_crocus:,crocus}%{?with_i915:,i915}%{?with_iris:,iris}%{?with_vmware:,svga}%{?with_radeonsi:,radeonsi}%{?with_r600:,r600}%{?with_asahi:,asahi}%{?with_freedreno:,freedreno}%{?with_etnaviv:,etnaviv}%{?with_tegra:,tegra}%{?with_vc4:,vc4}%{?with_v3d:,v3d}%{?with_lima:,lima}%{?with_panfrost:,panfrost}%{?with_vulkan_hw:,zink}%{?with_d3d12:,d3d12} \
 %else
   -Dgallium-drivers=llvmpipe,virgl \
 %endif
   -Dgallium-vdpau=%{?with_vdpau:enabled}%{!?with_vdpau:disabled} \
   -Dgallium-va=%{?with_va:enabled}%{!?with_va:disabled} \
-  -Dgallium-xa=%{?with_xa:enabled}%{!?with_xa:disabled} \
-  -Dgallium-nine=%{?with_nine:true}%{!?with_nine:false} \
+  -Dgallium-mediafoundation=disabled \
   -Dteflon=%{?with_teflon:true}%{!?with_teflon:false} \
-  -Dgallium-opencl=%{?with_opencl:icd}%{!?with_opencl:disabled} \
 %if 0%{?with_opencl}
   -Dgallium-rusticl=true \
 %endif
   -Dvulkan-drivers=%{?vulkan_drivers} \
   -Dvulkan-layers=device-select \
-  -Dshared-glapi=enabled \
   -Dgles1=disabled \
   -Dgles2=enabled \
   -Dopengl=true \
@@ -541,16 +562,12 @@ export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
   -Dglx=dri \
   -Degl=enabled \
   -Dglvnd=enabled \
-%if 0%{?with_intel_clc}
-  -Dintel-clc=enabled \
-%endif
   -Dintel-rt=%{?with_intel_vk_rt:enabled}%{!?with_intel_vk_rt:disabled} \
   -Dmicrosoft-clc=disabled \
   -Dllvm=enabled \
   -Dshared-llvm=enabled \
   -Dvalgrind=%{?with_valgrind:enabled}%{!?with_valgrind:disabled} \
   -Dbuild-tests=false \
-  -Dselinux=true \
 %if !0%{?with_libunwind}
   -Dlibunwind=disabled \
 %endif
@@ -564,6 +581,14 @@ export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
   %{nil}
 %meson_build
 
+%if 0%{?with_nvk}
+%cargo_license_summary
+%{cargo_license} > LICENSE.dependencies
+%if 0%{?vendor_nvk_crates}
+%cargo_vendor_manifest
+%endif
+%endif
+
 %install
 cd meson-%{meson_ver}
 %py3_install
@@ -572,7 +597,6 @@ export PYTHONPATH=%{buildroot}%{python3_sitelib}:%{python3_sitelib}
 cd -
 
 %meson_install
-
 # Delete files installed by meson
 rm -f  %{buildroot}%{_bindir}/meson
 rm -rf %{buildroot}%{_mandir}/man1/meson.1*
@@ -580,6 +604,8 @@ rm -f  %{buildroot}%{_datadir}/polkit-1/actions/com.mesonbuild.install.policy
 rm -f  %{buildroot}%{_datadir}/bash-completion/completions/meson
 rm -f  %{buildroot}%{_datadir}/zsh/site-functions/_meson
 rm -rf %{buildroot}%{python3_sitelib}
+
+
 
 # Delete files installed by libclc
 rm -fr %{buildroot}%{_libdir}/clc
@@ -598,11 +624,18 @@ rm -fr %{buildroot}%{_datadir}/wayland-protocols/
 
 # libvdpau opens the versioned name, don't bother including the unversioned
 rm -vf %{buildroot}%{_libdir}/vdpau/*.so
+
 # likewise glvnd
 rm -vf %{buildroot}%{_libdir}/libGLX_mesa.so
 rm -vf %{buildroot}%{_libdir}/libEGL_mesa.so
 # XXX can we just not build this
 rm -vf %{buildroot}%{_libdir}/libGLES*
+
+%if ! 0%{?with_asahi}
+# This symlink is unconditionally created when any kmsro driver is enabled
+# We don't want this one so delete it
+rm -vf %{buildroot}%{_libdir}/dri/apple_dri.so
+%endif
 
 # glvnd needs a default provider for indirect rendering where it cannot
 # determine the vendor
@@ -610,7 +643,7 @@ ln -s %{_libdir}/libGLX_mesa.so.0 %{buildroot}%{_libdir}/libGLX_system.so.0
 
 # this keeps breaking, check it early.  note that the exit from eu-ftr is odd.
 pushd %{buildroot}%{_libdir}
-for i in libOSMesa*.so libGL.so ; do
+for i in libGL.so ; do
     eu-findtextrel $i && exit 1
 done
 popd
@@ -637,38 +670,14 @@ popd
 %{_includedir}/EGL/eglext_angle.h
 %{_includedir}/EGL/eglmesaext.h
 
-%files libOSMesa
-%{_libdir}/libOSMesa.so.8*
-%files libOSMesa-devel
-%dir %{_includedir}/GL
-%{_includedir}/GL/osmesa.h
-%{_libdir}/libOSMesa.so
-%{_libdir}/pkgconfig/osmesa.pc
-
 %files libgbm
 %{_libdir}/libgbm.so.1
 %{_libdir}/libgbm.so.1.*
 %files libgbm-devel
 %{_libdir}/libgbm.so
 %{_includedir}/gbm.h
+%{_includedir}/gbm_backend_abi.h
 %{_libdir}/pkgconfig/gbm.pc
-
-%if 0%{?with_xa}
-%files libxatracker
-%if 0%{?with_hardware}
-%{_libdir}/libxatracker.so.2
-%{_libdir}/libxatracker.so.2.*
-%endif
-
-%files libxatracker-devel
-%if 0%{?with_hardware}
-%{_libdir}/libxatracker.so
-%{_includedir}/xa_tracker.h
-%{_includedir}/xa_composite.h
-%{_includedir}/xa_context.h
-%{_libdir}/pkgconfig/xatracker.pc
-%endif
-%endif
 
 %if 0%{?with_teflon}
 %files libTeflon
@@ -677,25 +686,11 @@ popd
 
 %if 0%{?with_opencl}
 %files libOpenCL
-%{_libdir}/libMesaOpenCL.so.*
 %{_libdir}/libRusticlOpenCL.so.*
-%{_sysconfdir}/OpenCL/vendors/mesa.icd
 %{_sysconfdir}/OpenCL/vendors/rusticl.icd
 
 %files libOpenCL-devel
-%{_libdir}/libMesaOpenCL.so
 %{_libdir}/libRusticlOpenCL.so
-%endif
-
-%if 0%{?with_nine}
-%files libd3d
-%dir %{_libdir}/d3d/
-%{_libdir}/d3d/*.so.*
-
-%files libd3d-devel
-%{_libdir}/pkgconfig/d3d.pc
-%{_includedir}/d3dadapter/
-%{_libdir}/d3d/*.so
 %endif
 
 %files dri-drivers
@@ -720,8 +715,18 @@ popd
 %ifarch %{ix86} x86_64
 %{_libdir}/dri/crocus_dri.so
 %{_libdir}/dri/iris_dri.so
+%if 0%{?with_i915}
+%{_libdir}/dri/i915_dri.so
+%endif
 %endif
 %ifarch %{arm} aarch64
+%if 0%{?with_asahi}
+%{_libdir}/dri/apple_dri.so
+%{_libdir}/dri/asahi_dri.so
+%endif
+%if 0%{?with_d3d12}
+%{_libdir}/dri/d3d12_dri.so
+%endif
 %{_libdir}/dri/ingenic-drm_dri.so
 %{_libdir}/dri/imx-drm_dri.so
 %{_libdir}/dri/imx-lcdif_dri.so
@@ -760,10 +765,6 @@ popd
 %if 0%{?with_vmware}
 %{_libdir}/dri/vmwgfx_dri.so
 %endif
-%endif
-%if 0%{?with_opencl}
-%dir %{_libdir}/gallium-pipe
-%{_libdir}/gallium-pipe/*.so
 %endif
 %if 0%{?with_kmsro}
 %{_libdir}/dri/armada-drm_dri.so
@@ -806,6 +807,9 @@ popd
 %if 0%{?with_radeonsi}
 %{_libdir}/dri/radeonsi_drv_video.so
 %endif
+%if 0%{?with_d3d12}
+%{_libdir}/dri/d3d12_drv_video.so
+%endif
 %{_libdir}/dri/virtio_gpu_drv_video.so
 %endif
 
@@ -819,14 +823,34 @@ popd
 %if 0%{?with_radeonsi}
 %{_libdir}/vdpau/libvdpau_radeonsi.so.1*
 %endif
+%if 0%{?with_d3d12}
+%{_libdir}/vdpau/libvdpau_d3d12.so.1*
+%endif
 %{_libdir}/vdpau/libvdpau_virtio_gpu.so.1*
 %endif
 
+%if 0%{?with_d3d12}
+%files dxil-devel
+%{_bindir}/spirv2dxil
+%{_libdir}/libspirv_to_dxil.a
+%{_libdir}/libspirv_to_dxil.so
+%endif
+
 %files vulkan-drivers
+%if 0%{?with_nvk}
+%license LICENSE.dependencies
+%if 0%{?vendor_nvk_crates}
+%license cargo-vendor.txt
+%endif
+%endif
 %{_libdir}/libvulkan_lvp.so
 %{_datadir}/vulkan/icd.d/lvp_icd.*.json
 %{_libdir}/libVkLayer_MESA_device_select.so
 %{_datadir}/vulkan/implicit_layer.d/VkLayer_MESA_device_select.json
+%if 0%{?with_virtio}
+%{_libdir}/libvulkan_virtio.so
+%{_datadir}/vulkan/icd.d/virtio_icd.*.json
+%endif
 %if 0%{?with_vulkan_hw}
 %{_libdir}/libvulkan_radeon.so
 %{_datadir}/drirc.d/00-radv-defaults.conf
@@ -835,6 +859,10 @@ popd
 %{_libdir}/libvulkan_nouveau.so
 %{_datadir}/vulkan/icd.d/nouveau_icd.*.json
 %endif
+%if 0%{?with_d3d12}
+%{_libdir}/libvulkan_dzn.so
+%{_datadir}/vulkan/icd.d/dzn_icd.*.json
+%endif
 %ifarch %{ix86} x86_64
 %{_libdir}/libvulkan_intel.so
 %{_datadir}/vulkan/icd.d/intel_icd.*.json
@@ -842,6 +870,10 @@ popd
 %{_datadir}/vulkan/icd.d/intel_hasvk_icd.*.json
 %endif
 %ifarch %{arm} aarch64
+%if 0%{?with_asahi}
+%{_libdir}/libvulkan_asahi.so
+%{_datadir}/vulkan/icd.d/asahi_icd.*.json
+%endif
 %{_libdir}/libvulkan_broadcom.so
 %{_datadir}/vulkan/icd.d/broadcom_icd.*.json
 %{_libdir}/libvulkan_freedreno.so
@@ -855,11 +887,27 @@ popd
 %endif
 
 %changelog
-* Mon Feb 23 2026 Anusha Srivatsa <asrivats@redhat.com> - 25.0.7-5
-- Resolves: https://issues.redhat.com/browse/RHEL-151404
+* Mon Feb 23 2026 José Expósito <jexposit@redhat.com> - 25.2.7-4
+- Fix s390x regressions
+  Resolves: https://issues.redhat.com/browse/RHEL-151315
 
-* Tue Jan 6 2026 Jocelyn Falempe <jfalempe@redhat.com - 25.0.7-4
-- Resolves: https://issues.redhat.com/browse/RHEL-138704
+* Wed Jan 28 2026 José Expósito <jexposit@redhat.com> - 25.2.7-3
+- Enable va-driver only in Fedora
+  Resolves: https://issues.redhat.com/browse/RHEL-144489
+
+* Tue Jan 6 2026 Jocelyn Falempe <jfalempe@redhat.com - 25.2.7-2
+- Resolves: https://issues.redhat.com/browse/RHEL-105157
+
+* Wed Nov 28 2025 Mika Penttilä <mpenttil@redhat.com> - 25.2.7-1
+- Resolves: https://issues.redhat.com/browse/RHEL-132415
+
+* Tue Nov 18 2025 Mika Penttilä José Expósito <jexposit@redhat.com> - 25.2.5-2
+- Disable LTO globally
+  Resolves: https://issues.redhat.com/browse/RHEL-128255
+
+* Wed Nov 5 2025 Mika Penttilä <mpenttila@redhat.com - 25.2.5
+- Resolves: https://issues.redhat.com/browse/RHEL-107477
+  Enable NVK also for RHEL 9
 
 * Thu Sep 18 2025 Jocelyn Falempe <jfalempe@redhat.com> - 25.0.7-3
 - Fix black screen on ppc64le

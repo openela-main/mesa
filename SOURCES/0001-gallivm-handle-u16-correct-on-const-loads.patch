@@ -1,0 +1,36 @@
+From c016346b50e9085b531f9bcbd7cfd63d3806a3e1 Mon Sep 17 00:00:00 2001
+From: Dave Airlie <airlied@redhat.com>
+Date: Wed, 11 Feb 2026 05:47:57 +1000
+Subject: [PATCH] gallivm: handle u16 correct on const loads.
+
+I somehow screwed this up on my previous attempt at fixing this bug,
+
+This should fix the loop limiter bug on big endian properly.
+
+Reviewed-by: Georg Lehmann <dadschoorse@gmail.com>
+Cc: mesa-stable
+Fixes: e28cfb2bada2 ("gallivm: handle u8/u16 const loads properly on big-endian.")
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/39813>
+---
+ src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c b/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c
+index 770f1cc6592..e755225dce9 100644
+--- a/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c
++++ b/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c
+@@ -1269,10 +1269,7 @@ emit_load_const(struct lp_build_nir_soa_context *bld,
+ 
+    for (unsigned i = 0; i < instr->def.num_components; i++) {
+      outval[i] = lp_build_const_int_vec(bld->base.gallivm, int_bld->type,
+-                                        bits == 8 ? instr->value[i].u8 :
+-                                        bits == 16 ? instr->value[i].u32 :
+-                                        bits == 32 ? instr->value[i].u32 :
+-                                                     instr->value[i].u64);
++                                        nir_const_value_as_uint(instr->value[i], bits));
+    }
+    for (unsigned i = instr->def.num_components; i < NIR_MAX_VEC_COMPONENTS; i++) {
+       outval[i] = NULL;
+-- 
+2.53.0
+
