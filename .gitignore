@@ -1,3 +1,10 @@
-SOURCES/libclc-20.1.3.src.tar.xz
-SOURCES/mesa-25.0.7.tar.xz
-SOURCES/spirv-llvm-translator-834db1a.tar.gz
+SOURCES/syn-2.0.106.tar.gz
+SOURCES/libclc-21.1.3.src.tar.xz
+SOURCES/mesa-25.2.7.tar.xz
+SOURCES/quote-1.0.40.tar.gz
+SOURCES/rustc-hash-2.1.1.tar.gz
+SOURCES/spirv-llvm-translator-a37544f.tar.gz
+SOURCES/unicode-ident-1.0.18.tar.gz
+SOURCES/meson-1.7.0.tar.gz
+SOURCES/paste-1.0.15.tar.gz
+SOURCES/proc-macro2-1.0.101.tar.gz
