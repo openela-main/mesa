@@ -82,7 +82,7 @@ Name:           mesa
 Summary:        Mesa graphics libraries
 %global ver 25.2.7
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
-Release:        4%{?dist}
+Release:        5%{?dist}
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
 URL:            http://www.mesa3d.org
 
@@ -152,6 +152,13 @@ Patch14:        0001-Revert-dri-fix-__DRI_IMAGE_FORMAT-to-PIPE_FORMAT-map.patch
 # Fix performance issue with Xorg
 Patch21:	0001-drisw-Modify-drisw_swap_buffers_with_damage-to-swap-.patch
 Patch22:	0002-Revert-drisw-Copy-entire-buffer-ignoring-damage-regi.patch
+
+# Fix freeze with nouveau + zink + motif
+Patch30:	0001-zink-Return-zink_device-in-create_logical_device.patch
+Patch31:	0002-zink-Make-screen-queue_lock-a-pointer.patch
+Patch32:	0003-zink-Create-one-queue-lock-per-device.patch
+Patch33:	0004-zink-Lock-queue_lock-in-zink_destroy_screen.patch
+Patch34:	0005-zink-Lock-around-screen_debug_marker_-begin-end.patch
 
 BuildRequires:  meson
 BuildRequires:  gcc
@@ -887,6 +894,9 @@ popd
 %endif
 
 %changelog
+* Mon Jul 6 2026 Jocelyn Falempe <jfalempe@redhat.com> - 25.2.7-5
+- Resolves: https://redhat.atlassian.net/browse/RHEL-181885
+
 * Mon Feb 23 2026 José Expósito <jexposit@redhat.com> - 25.2.7-4
 - Fix s390x regressions
   Resolves: https://issues.redhat.com/browse/RHEL-151315

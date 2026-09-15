@@ -1,0 +1,206 @@
+From 201c5409b429eebaf63a00717ee9efcc68ddefe4 Mon Sep 17 00:00:00 2001
+From: Mel Henning <mhenning@darkrefraction.com>
+Date: Wed, 12 Nov 2025 17:26:42 -0500
+Subject: [PATCH 2/5] zink: Make screen->queue_lock a pointer
+
+Fixes: 015eda4a4186c ("zink: deduplicate VkDevice and VkInstance")
+Reviewed-by: Dave Airlie <airlied@redhat.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/38414>
+---
+ src/gallium/drivers/zink/zink_batch.c   |  4 ++--
+ src/gallium/drivers/zink/zink_bo.c      |  8 ++++----
+ src/gallium/drivers/zink/zink_context.c |  8 ++++----
+ src/gallium/drivers/zink/zink_kopper.c  | 20 ++++++++++----------
+ src/gallium/drivers/zink/zink_screen.c  |  3 ++-
+ src/gallium/drivers/zink/zink_types.h   |  3 ++-
+ 6 files changed, 24 insertions(+), 22 deletions(-)
+
+diff --git a/src/gallium/drivers/zink/zink_batch.c b/src/gallium/drivers/zink/zink_batch.c
+index 0916f44c453..4e6b7e038ca 100644
+--- a/src/gallium/drivers/zink/zink_batch.c
++++ b/src/gallium/drivers/zink/zink_batch.c
+@@ -761,7 +761,7 @@ submit_queue(void *data, void *gdata, int thread_index)
+       );
+    }
+ 
+-   simple_mtx_lock(&screen->queue_lock);
++   simple_mtx_lock(screen->queue_lock);
+    VRAM_ALLOC_LOOP(result,
+       VKSCR(QueueSubmit)(screen->queue, num_si, submit, VK_NULL_HANDLE),
+       if (result != VK_SUCCESS) {
+@@ -769,7 +769,7 @@ submit_queue(void *data, void *gdata, int thread_index)
+          bs->is_device_lost = true;
+       }
+    );
+-   simple_mtx_unlock(&screen->queue_lock);
++   simple_mtx_unlock(screen->queue_lock);
+ 
+    unsigned i = 0;
+    VkSemaphore *sem = bs->signal_semaphores.data;
+diff --git a/src/gallium/drivers/zink/zink_bo.c b/src/gallium/drivers/zink/zink_bo.c
+index e3ba593f9b6..962bb0d4c0a 100644
+--- a/src/gallium/drivers/zink/zink_bo.c
++++ b/src/gallium/drivers/zink/zink_bo.c
+@@ -783,11 +783,11 @@ init_timeline_wait(struct zink_context *ctx, struct zink_resource *res, bool com
+ 
+    if (zink_resource_usage_is_unflushed(res) && !zink_resource_usage_matches(res, ctx->bs)) {
+       /* assuming this is a batch that is doing an async submit: unlock wait for that to finish */
+-      simple_mtx_unlock(&screen->queue_lock);
++      simple_mtx_unlock(screen->queue_lock);
+       /* note that this can deadlock if multi-context */
+       zink_resource_usage_unflushed_wait(ctx, res, ZINK_RESOURCE_ACCESS_RW);
+       /* make sure to lock again and take queue ownership */
+-      simple_mtx_lock(&screen->queue_lock);
++      simple_mtx_lock(screen->queue_lock);
+    }
+    *wait = screen->sem;
+    timeline.pWaitSemaphoreValues = &screen->curr_batch;
+@@ -1024,7 +1024,7 @@ zink_bo_commit(struct zink_context *ctx, struct zink_resource *res, unsigned lev
+    struct zink_bo *bo = res->obj->bo;
+    VkSemaphore cur_sem = *sem;
+ 
+-   simple_mtx_lock(&screen->queue_lock);
++   simple_mtx_lock(screen->queue_lock);
+    simple_mtx_lock(&bo->lock);
+    if (res->base.b.target == PIPE_BUFFER) {
+       ok = buffer_bo_commit(ctx, res, box->x, box->width, commit, &cur_sem);
+@@ -1239,7 +1239,7 @@ zink_bo_commit(struct zink_context *ctx, struct zink_resource *res, unsigned lev
+ out:
+ 
+    simple_mtx_unlock(&bo->lock);
+-   simple_mtx_unlock(&screen->queue_lock);
++   simple_mtx_unlock(screen->queue_lock);
+    *sem = cur_sem;
+    return ok;
+ }
+diff --git a/src/gallium/drivers/zink/zink_context.c b/src/gallium/drivers/zink/zink_context.c
+index 46b66ccdbef..28f19c96b03 100644
+--- a/src/gallium/drivers/zink/zink_context.c
++++ b/src/gallium/drivers/zink/zink_context.c
+@@ -125,17 +125,17 @@ zink_context_destroy(struct pipe_context *pctx)
+    if (util_queue_is_initialized(&screen->flush_queue))
+       util_queue_finish(&screen->flush_queue);
+    if (ctx->bs && !screen->device_lost) {
+-      simple_mtx_lock(&screen->queue_lock);
++      simple_mtx_lock(screen->queue_lock);
+       VkResult result = VKSCR(QueueWaitIdle)(screen->queue);
+-      simple_mtx_unlock(&screen->queue_lock);
++      simple_mtx_unlock(screen->queue_lock);
+ 
+       if (result != VK_SUCCESS)
+          mesa_loge("ZINK: vkQueueWaitIdle failed (%s)", vk_Result_to_str(result));
+ 
+       if (screen->queue_sparse && screen->queue_sparse != screen->queue) {
+-         simple_mtx_lock(&screen->queue_lock);
++         simple_mtx_lock(screen->queue_lock);
+          VkResult result = VKSCR(QueueWaitIdle)(screen->queue_sparse);
+-         simple_mtx_unlock(&screen->queue_lock);
++         simple_mtx_unlock(screen->queue_lock);
+ 
+          if (result != VK_SUCCESS)
+             mesa_loge("ZINK: vkQueueWaitIdle failed (%s)", vk_Result_to_str(result));
+diff --git a/src/gallium/drivers/zink/zink_kopper.c b/src/gallium/drivers/zink/zink_kopper.c
+index b197fb6beb9..38df1420393 100644
+--- a/src/gallium/drivers/zink/zink_kopper.c
++++ b/src/gallium/drivers/zink/zink_kopper.c
+@@ -336,9 +336,9 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
+    if (error == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) {
+       if (cdt->async)
+          util_queue_finish(&screen->flush_queue);
+-      simple_mtx_lock(&screen->queue_lock);
++      simple_mtx_lock(screen->queue_lock);
+       VkResult wait_result = VKSCR(QueueWaitIdle)(screen->queue);
+-      simple_mtx_unlock(&screen->queue_lock);
++      simple_mtx_unlock(screen->queue_lock);
+       if (wait_result != VK_SUCCESS)
+          mesa_loge("ZINK: vkQueueWaitIdle failed (%s)", vk_Result_to_str(wait_result));
+       error = VKSCR(CreateSwapchainKHR)(screen->dev, &cswap->scci, NULL,
+@@ -741,7 +741,7 @@ kopper_present(void *data, void *gdata, int thread_idx)
+    VkResult error = VK_SUCCESS;
+    cpi->info.pResults = &error;
+ 
+-   simple_mtx_lock(&screen->queue_lock);
++   simple_mtx_lock(screen->queue_lock);
+    if (screen->driver_workarounds.implicit_sync && cdt->type != KOPPER_WIN32) {
+       if (!screen->fence) {
+          VkFenceCreateInfo fci = {0};
+@@ -758,13 +758,13 @@ kopper_present(void *data, void *gdata, int thread_idx)
+ 
+       error = VKSCR(QueueSubmit)(screen->queue, 1, &si, screen->fence);
+       if (!zink_screen_handle_vkresult(screen, error)) {
+-         simple_mtx_unlock(&screen->queue_lock);
++         simple_mtx_unlock(screen->queue_lock);
+          VKSCR(DestroySemaphore)(screen->dev, cpi->sem, NULL);
+          goto out;
+       }
+       error = VKSCR(WaitForFences)(screen->dev, 1, &screen->fence, VK_TRUE, UINT64_MAX);
+       if (!zink_screen_handle_vkresult(screen, error)) {
+-         simple_mtx_unlock(&screen->queue_lock);
++         simple_mtx_unlock(screen->queue_lock);
+          VKSCR(DestroySemaphore)(screen->dev, cpi->sem, NULL);
+          goto out;
+       }
+@@ -774,7 +774,7 @@ kopper_present(void *data, void *gdata, int thread_idx)
+    VkResult error2 = VKSCR(QueuePresentKHR)(screen->queue, &cpi->info);
+    zink_screen_debug_marker_end(screen, screen->frame_marker_emitted);
+    zink_screen_debug_marker_begin(screen, "frame");
+-   simple_mtx_unlock(&screen->queue_lock);
++   simple_mtx_unlock(screen->queue_lock);
+    swapchain->last_present = cpi->image;
+    if (cpi->indefinite_acquire)
+       p_atomic_dec(&swapchain->num_acquires);
+@@ -1054,9 +1054,9 @@ zink_kopper_present_readback(struct zink_context *ctx, struct zink_resource *res
+    si.waitSemaphoreCount = !!acquire;
+    si.pWaitSemaphores = &acquire;
+    si.pSignalSemaphores = &present;
+-   simple_mtx_lock(&screen->queue_lock);
++   simple_mtx_lock(screen->queue_lock);
+    VkResult error = VKSCR(QueueSubmit)(screen->queue, 1, &si, VK_NULL_HANDLE);
+-   simple_mtx_unlock(&screen->queue_lock);
++   simple_mtx_unlock(screen->queue_lock);
+    if (!zink_screen_handle_vkresult(screen, error))
+       return false;
+ 
+@@ -1064,9 +1064,9 @@ zink_kopper_present_readback(struct zink_context *ctx, struct zink_resource *res
+    if (cdt->async)
+       util_queue_fence_wait(&cdt->swapchain->present_fence);
+ 
+-   simple_mtx_lock(&screen->queue_lock);
++   simple_mtx_lock(screen->queue_lock);
+    error = VKSCR(QueueWaitIdle)(screen->queue);
+-   simple_mtx_unlock(&screen->queue_lock);
++   simple_mtx_unlock(screen->queue_lock);
+ 
+    simple_mtx_lock(&screen->semaphores_lock);
+    util_dynarray_append(&screen->semaphores, VkSemaphore, acquire);
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index 0faa0e15770..c0025bf5ecd 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -1762,7 +1762,8 @@ update_queue_props(struct zink_screen *screen)
+ static void
+ init_queue(struct zink_screen *screen)
+ {
+-   simple_mtx_init(&screen->queue_lock, mtx_plain);
++   simple_mtx_init(&screen->queue_lock_storage, mtx_plain);
++   screen->queue_lock = &screen->queue_lock_storage;
+    VKSCR(GetDeviceQueue)(screen->dev, screen->gfx_queue, 0, &screen->queue);
+    if (screen->sparse_queue != screen->gfx_queue)
+       VKSCR(GetDeviceQueue)(screen->dev, screen->sparse_queue, 0, &screen->queue_sparse);
+diff --git a/src/gallium/drivers/zink/zink_types.h b/src/gallium/drivers/zink/zink_types.h
+index 6764fe6bcf4..aad183af89f 100644
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -1453,7 +1453,8 @@ struct zink_screen {
+    VkDevice dev;
+    VkQueue queue; //gfx+compute
+    VkQueue queue_sparse;
+-   simple_mtx_t queue_lock;
++   simple_mtx_t *queue_lock;
++   simple_mtx_t queue_lock_storage;
+    VkDebugUtilsMessengerEXT debugUtilsCallbackHandle;
+ 
+    uint32_t cur_custom_border_color_samplers;
+-- 
+2.54.0
+

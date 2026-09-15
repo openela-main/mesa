@@ -1,0 +1,39 @@
+From b3b01eb5b9502582c7a09f1cd7636aa066dfbaa7 Mon Sep 17 00:00:00 2001
+From: Mel Henning <mhenning@darkrefraction.com>
+Date: Wed, 12 Nov 2025 18:14:28 -0500
+Subject: [PATCH 4/5] zink: Lock queue_lock in zink_destroy_screen
+
+Fixes: 015eda4a4186c ("zink: deduplicate VkDevice and VkInstance")
+Reviewed-by: Dave Airlie <airlied@redhat.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/38414>
+---
+ src/gallium/drivers/zink/zink_screen.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index 1e858f16e56..a8e3195957b 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -1460,13 +1460,19 @@ zink_destroy_screen(struct pipe_screen *pscreen)
+    struct zink_screen *screen = zink_screen(pscreen);
+ 
+    if (!screen->device_lost && screen->queue) {
++      // Multiple screens can share a queue, so we need to lock queue_lock even
++      // in the screen destructor
++      simple_mtx_lock(screen->queue_lock);
+       VkResult result = VKSCR(QueueWaitIdle)(screen->queue);
++      simple_mtx_unlock(screen->queue_lock);
+ 
+       if (result != VK_SUCCESS)
+          mesa_loge("ZINK: vkQueueWaitIdle failed (%s)", vk_Result_to_str(result));
+ 
+       if (screen->queue_sparse && screen->queue_sparse != screen->queue) {
++         simple_mtx_lock(screen->queue_lock);
+          result = VKSCR(QueueWaitIdle)(screen->queue_sparse);
++         simple_mtx_unlock(screen->queue_lock);
+ 
+          if (result != VK_SUCCESS)
+             mesa_loge("ZINK: vkQueueWaitIdle failed (%s)", vk_Result_to_str(result));
+-- 
+2.54.0
+
