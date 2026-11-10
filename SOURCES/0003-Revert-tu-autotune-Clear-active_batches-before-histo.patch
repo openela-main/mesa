@@ -1,0 +1,40 @@
+From 1d770a0fb463c03f7e4a1b0627b4af98a8789ad0 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 10:53:05 +0200
+Subject: [PATCH 03/19] Revert "tu/autotune: Clear active_batches before
+ history objects are freed"
+
+This reverts commit 42df4a7e416b387e06a67173e67ed6de1bfd6c5b.
+---
+ .pick_status.json                   | 2 +-
+ src/freedreno/vulkan/tu_autotune.cc | 1 -
+ 2 files changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/.pick_status.json b/.pick_status.json
+index 69436008ada..aeb82c74693 100644
+--- a/.pick_status.json
++++ b/.pick_status.json
+@@ -3314,7 +3314,7 @@
+         "description": "tu/autotune: Clear active_batches before history objects are freed",
+         "nominated": true,
+         "nomination_type": 2,
+-        "resolution": 1,
++        "resolution": 0,
+         "main_sha": null,
+         "because_sha": "40ffc052afff7a40da99b398c09594c3ff2d40ed",
+         "notes": null
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 820a655b2fc..028e9282227 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -1698,7 +1698,6 @@ tu_autotune::~tu_autotune()
+       at_log_base("finished processing all entries");
+    }
+ 
+-   active_batches.clear();
+    tu_bo_suballocator_finish(&suballoc);
+ }
+ 
+-- 
+2.54.0
+

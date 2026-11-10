@@ -1,0 +1,93 @@
+From db5315272229f2df847d663aec61c4204627adc4 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 11:03:15 +0200
+Subject: [PATCH 14/19] Revert "tu/autotune: Disable autotuning for small
+ renderpasses by default"
+
+This reverts commit bf2777c0130954f969c5a1038a01f94ec2d1ac63.
+---
+ docs/drivers/freedreno.rst          | 10 +++++-----
+ src/freedreno/vulkan/tu_autotune.cc | 19 +++++++------------
+ 2 files changed, 12 insertions(+), 17 deletions(-)
+
+diff --git a/docs/drivers/freedreno.rst b/docs/drivers/freedreno.rst
+index 9b1992fd628..a2318559526 100644
+--- a/docs/drivers/freedreno.rst
++++ b/docs/drivers/freedreno.rst
+@@ -709,12 +709,12 @@ environment variables:
+     GMEM rendering due to less overhead from tiling. This tends to lead to worse
+     performance in most cases, so it's only useful for testing.
+ 
+-  ``tune_small``
+-    Enables tuning for small render passes (those with a small number of draw
+-    calls). By default, small RPs always use SYSMEM mode as they generally don't
+-    benefit from GMEM rendering due to the overhead of tiling.
++  ``small_sysmem``
++    Always chooses SYSMEM rendering if the amount of draw calls in the render pass
++    is lower than a certain threshold. The benefits of GMEM rendering are less
++    pronounced in these smaller RPs and SYSMEM rendering tends to win more often.
+ 
+   Multiple flags can be combined by separating them with commas, e.g.
+-  ``TU_AUTOTUNE_FLAGS=big_gmem,tune_small``.
++  ``TU_AUTOTUNE_FLAGS=big_gmem,small_sysmem``.
+ 
+   If no flags are specified, the default behavior is used.
+\ No newline at end of file
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index c708c83c044..38d09f5db45 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -97,8 +97,8 @@ enum class tu_autotune::algorithm : uint8_t {
+ 
+ /* Modifier flags, these modify the behavior of the autotuner in a user-defined way. */
+ enum class tu_autotune::mod_flag : uint8_t {
+-   BIG_GMEM = BIT(1),         /* All RPs with >= 10 draws use GMEM. */
+-   TUNE_SMALL = BIT(2),       /* Try tuning all RPs with <= 5 draws, ignored by default. */
++   BIG_GMEM = BIT(1),          /* All RPs with >= 10 draws use GMEM. */
++   SMALL_SYSMEM = BIT(2),      /* All RPs with <= 5 draws use SYSMEM. */
+ };
+ 
+ /* Metric flags, for internal tracking of enabled metrics. */
+@@ -198,7 +198,7 @@ struct PACKED tu_autotune::config_t {
+ 
+       str += ", Mod Flags: 0x" + std::to_string(mod_flags) + " (";
+       MODF_STR(BIG_GMEM);
+-      MODF_STR(TUNE_SMALL);
++      MODF_STR(SMALL_SYSMEM);
+       str += ")";
+ 
+       str += ", Metric Flags: 0x" + std::to_string(metric_flags) + " (";
+@@ -280,7 +280,7 @@ tu_autotune::get_env_config()
+       if (flags_env_str) {
+          static const struct debug_control tu_at_flags_control[] = {
+             { "big_gmem", (uint32_t) mod_flag::BIG_GMEM },
+-            { "tune_small", (uint32_t) mod_flag::TUNE_SMALL },
++            { "small_sysmem", (uint32_t) mod_flag::SMALL_SYSMEM },
+             { NULL, 0 }
+          };
+ 
+@@ -1256,18 +1256,13 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
+     */
+    bool simultaneous_use = cmd_buffer->usage_flags & VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+ 
+-   /* These smaller RPs with few draws are too difficult to create a balanced hash for that can independently identify
+-    * them while not being so unique to not properly identify them across CBs. They're generally insigificant outside of
+-    * a few edge cases such as during deferred rendering G-buffer passes, as we don't have a good way to deal with those
+-    * edge cases yet, we just disable the autotuner for small RPs entirely for now unless TUNE_SMALL is specified.
+-    */
+-   bool ignore_small_rp = !config.test(mod_flag::TUNE_SMALL) && rp_state->drawcall_count < 5;
+-
+-   if (!enabled || simultaneous_use || ignore_small_rp)
++   if (!enabled || simultaneous_use)
+       return default_mode;
+ 
+    if (config.test(mod_flag::BIG_GMEM) && rp_state->drawcall_count >= 10)
+       return render_mode::GMEM;
++   if (config.test(mod_flag::SMALL_SYSMEM) && rp_state->drawcall_count <= 5)
++      return render_mode::SYSMEM;
+ 
+    rp_key key(pass, framebuffer, cmd_buffer);
+ 
+-- 
+2.54.0
+

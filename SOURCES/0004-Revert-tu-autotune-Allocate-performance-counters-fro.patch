@@ -1,0 +1,52 @@
+From d5561b08593b59df1f2bdc82a676fb565b84ef56 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 10:53:27 +0200
+Subject: [PATCH 04/19] Revert "tu/autotune: Allocate performance counters from
+ low-to-high"
+
+This reverts commit 203ae3509166ebb5076bdc0df28dbb30062c4dfd.
+---
+ .pick_status.json                   |  2 +-
+ src/freedreno/vulkan/tu_autotune.cc | 10 ++++++----
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/.pick_status.json b/.pick_status.json
+index aeb82c74693..e04710b3344 100644
+--- a/.pick_status.json
++++ b/.pick_status.json
+@@ -13964,7 +13964,7 @@
+         "description": "tu/autotune: Allocate performance counters from low-to-high",
+         "nominated": true,
+         "nomination_type": 1,
+-        "resolution": 1,
++        "resolution": 0,
+         "main_sha": null,
+         "because_sha": null,
+         "notes": null
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 028e9282227..2dd5017b11b 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -1660,13 +1660,15 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
+          auto always_count_countable = get_perfcntr_countable(cp_group, "PERF_CP_ALWAYS_COUNT");
+          if (preemption_latency_countable && always_count_countable) {
+             if (cp_group->num_counters >= 2) {
+-               preemption_latency_selector_reg = cp_group->counters[0].select_reg;
++               uint32_t preemption_latency_counter_index = cp_group->num_counters - 2;
++               preemption_latency_selector_reg = cp_group->counters[preemption_latency_counter_index].select_reg;
+                preemption_latency_selector = preemption_latency_countable->selector;
+-               preemption_latency_counter_reg_lo = cp_group->counters[0].counter_reg_lo;
++               preemption_latency_counter_reg_lo = cp_group->counters[preemption_latency_counter_index].counter_reg_lo;
+ 
+-               always_count_selector_reg = cp_group->counters[1].select_reg;
++               uint32_t always_count_counter_index = cp_group->num_counters - 1;
++               always_count_selector_reg = cp_group->counters[always_count_counter_index].select_reg;
+                always_count_selector = always_count_countable->selector;
+-               always_count_counter_reg_lo = cp_group->counters[1].counter_reg_lo;
++               always_count_counter_reg_lo = cp_group->counters[always_count_counter_index].counter_reg_lo;
+             } else {
+                fail_reason = "not enough counters in CP group for preemption latency tracking";
+             }
+-- 
+2.54.0
+

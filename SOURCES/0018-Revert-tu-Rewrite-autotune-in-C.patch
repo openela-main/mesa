@@ -1,0 +1,2456 @@
+From 7fd383b6eff6fc29d8acee2fd1f1940c925d3568 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 11:08:27 +0200
+Subject: [PATCH 18/19] Revert "tu: Rewrite autotune in C++"
+
+This reverts commit 40ffc052afff7a40da99b398c09594c3ff2d40ed.
+---
+ docs/drivers/freedreno.rst            |   35 -
+ src/freedreno/vulkan/tu_autotune.cc   | 1448 ++++++++++---------------
+ src/freedreno/vulkan/tu_autotune.h    |  325 ++----
+ src/freedreno/vulkan/tu_cmd_buffer.cc |   55 +-
+ src/freedreno/vulkan/tu_cmd_buffer.h  |    3 +-
+ src/freedreno/vulkan/tu_device.cc     |   13 +-
+ src/freedreno/vulkan/tu_device.h      |   16 +-
+ src/freedreno/vulkan/tu_pass.cc       |   23 +
+ src/freedreno/vulkan/tu_queue.cc      |    6 +-
+ 9 files changed, 766 insertions(+), 1158 deletions(-)
+
+diff --git a/docs/drivers/freedreno.rst b/docs/drivers/freedreno.rst
+index ee733950fe4..f2a47d99e9c 100644
+--- a/docs/drivers/freedreno.rst
++++ b/docs/drivers/freedreno.rst
+@@ -670,38 +670,3 @@ are supported at the moment: ``nir``, ``nobin``, ``sysmem``, ``gmem``, ``forcebi
+ Some of these options will behave differently when toggled at runtime, for example:
+ ``nolrz`` will still result in LRZ allocation which would not happen if the option
+ was set in the environment variable.
+-
+-Autotune
+-^^^^^^^^
+-
+-Turnip supports dynamically selecting between SYSMEM and GMEM rendering with the
+-autotune system, the behavior of which can be controlled with the following
+-environment variables:
+-
+-.. envvar:: TU_AUTOTUNE_ALGO
+-
+-  Selects the algorithm used for autotuning. Supported values are:
+-
+-  ``bandwidth``
+-    Estimates the bandwidth usage of rendering in SYSMEM and GMEM modes, and chooses
+-    the one with lower estimated bandwidth. This is the default algorithm.
+-
+-.. envvar:: TU_AUTOTUNE_FLAGS
+-
+-  Modifies the behavior of the selected algorithm. Supported flags are:
+-
+-  ``big_gmem``
+-    Always chooses GMEM rendering if the amount of draw calls in the render pass
+-    is greater than a certain threshold. Larger RPs generally benefit more from
+-    GMEM rendering due to less overhead from tiling. This tends to lead to worse
+-    performance in most cases, so it's only useful for testing.
+-
+-  ``small_sysmem``
+-    Always chooses SYSMEM rendering if the amount of draw calls in the render pass
+-    is lower than a certain threshold. The benefits of GMEM rendering are less
+-    pronounced in these smaller RPs and SYSMEM rendering tends to win more often.
+-
+-  Multiple flags can be combined by separating them with commas, e.g.
+-  ``TU_AUTOTUNE_FLAGS=big_gmem,small_sysmem``.
+-
+-  If no flags are specified, the default behavior is used.
+\ No newline at end of file
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 971cc1a9503..e6b0e77af91 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -5,308 +5,113 @@
+ 
+ #include "tu_autotune.h"
+ 
+-#include <algorithm>
+-#include <array>
+-#include <atomic>
+-#include <cmath>
+-#include <optional>
+-#include <string>
+-#include <string_view>
+-
+-#include "util/rand_xor.h"
+-
+-#define XXH_INLINE_ALL
+-#include "util/xxhash.h"
+-
+ #include "tu_cmd_buffer.h"
+ #include "tu_cs.h"
+ #include "tu_device.h"
+ #include "tu_image.h"
+ #include "tu_pass.h"
+ 
+-/** Compile-time debug options **/
+-
+-#define TU_AUTOTUNE_DEBUG_LOG_BASE      0
+-#define TU_AUTOTUNE_DEBUG_LOG_BANDWIDTH 0
+-
+-#if TU_AUTOTUNE_DEBUG_LOG_BASE
+-#define at_log_base(fmt, ...)         mesa_logi("autotune: " fmt, ##__VA_ARGS__)
+-#define at_log_base_h(fmt, hash, ...) mesa_logi("autotune %016" PRIx64 ": " fmt, hash, ##__VA_ARGS__)
+-#else
+-#define at_log_base(fmt, ...)
+-#define at_log_base_h(fmt, hash, ...)
+-#endif
+-
+-#if TU_AUTOTUNE_DEBUG_LOG_BANDWIDTH
+-#define at_log_bandwidth_h(fmt, hash, ...) mesa_logi("autotune-bw %016" PRIx64 ": " fmt, hash, ##__VA_ARGS__)
+-#else
+-#define at_log_bandwidth_h(fmt, hash, ...)
+-#endif
+-
+-/* Process any pending entries on autotuner finish, could be used to gather data from traces. */
+-#define TU_AUTOTUNE_FLUSH_AT_FINISH 0
+-
+-/** Global constants and helpers **/
+-
+-/* GPU always-on timer constants */
+-constexpr uint64_t ALWAYS_ON_FREQUENCY_HZ = 19'200'000;
+-constexpr double GPU_TICKS_PER_US = ALWAYS_ON_FREQUENCY_HZ / 1'000'000.0;
+-
+-constexpr uint64_t
+-ticks_to_us(uint64_t ticks)
+-{
+-   return ticks / GPU_TICKS_PER_US;
+-}
+-
+-constexpr bool
+-fence_before(uint32_t a, uint32_t b)
+-{
+-   /* Essentially a < b, but handles wrapped values. */
+-   return (int32_t) (a - b) < 0;
+-}
+-
+-constexpr const char *
+-render_mode_str(tu_autotune::render_mode mode)
+-{
+-   switch (mode) {
+-   case tu_autotune::render_mode::SYSMEM:
+-      return "SYSMEM";
+-   case tu_autotune::render_mode::GMEM:
+-      return "GMEM";
+-   default:
+-      return "UNKNOWN";
+-   }
+-}
+-
+-/** Configuration **/
+-
+-enum class tu_autotune::algorithm : uint8_t {
+-   BANDWIDTH = 0,    /* Uses estimated BW for determining rendering mode. */
+-
+-   DEFAULT = BANDWIDTH, /* Default algorithm, used if no other is specified. */
+-};
+-
+-/* Modifier flags, these modify the behavior of the autotuner in a user-defined way. */
+-enum class tu_autotune::mod_flag : uint8_t {
+-   BIG_GMEM = BIT(1),          /* All RPs with >= 10 draws use GMEM. */
+-   SMALL_SYSMEM = BIT(2),      /* All RPs with <= 5 draws use SYSMEM. */
+-};
+-
+-/* Metric flags, for internal tracking of enabled metrics. */
+-enum class tu_autotune::metric_flag : uint8_t {
+-   SAMPLES = BIT(1), /* Enable tracking samples passed metric. */
+-};
+-
+-struct PACKED tu_autotune::config_t {
+- private:
+-   algorithm algo = algorithm::DEFAULT;
+-   uint8_t mod_flags = 0;    /* See mod_flag enum. */
+-   uint8_t metric_flags = 0; /* See metric_flag enum. */
+-
+-   constexpr void update_metric_flags()
+-   {
+-      /* Note: Always keep in sync with rp_history to prevent UB. */
+-      if (algo == algorithm::BANDWIDTH) {
+-         metric_flags |= (uint8_t) metric_flag::SAMPLES;
+-      }
+-   }
+-
+- public:
+-   constexpr config_t() = default;
+-
+-   constexpr config_t(algorithm algo, uint8_t mod_flags): algo(algo), mod_flags(mod_flags)
+-   {
+-      update_metric_flags();
+-   }
+-
+-   constexpr bool is_enabled(algorithm a) const
+-   {
+-      return algo == a;
+-   }
+-
+-   constexpr bool test(mod_flag f) const
+-   {
+-      return mod_flags & (uint32_t) f;
+-   }
+-
+-   constexpr bool test(metric_flag f) const
+-   {
+-      return metric_flags & (uint32_t) f;
+-   }
+-
+-   constexpr bool set_algo(algorithm a)
+-   {
+-      if (algo == a)
+-         return false;
+-
+-      algo = a;
+-      update_metric_flags();
+-      return true;
+-   }
+-
+-   constexpr bool disable(mod_flag f)
+-   {
+-      if (!(mod_flags & (uint8_t) f))
+-         return false;
+-
+-      mod_flags &= ~(uint8_t) f;
+-      update_metric_flags();
+-      return true;
+-   }
++#define XXH_INLINE_ALL
++#include "util/xxhash.h"
+ 
+-   constexpr bool enable(mod_flag f)
+-   {
+-      if (mod_flags & (uint8_t) f)
+-         return false;
++/* How does it work?
++ *
++ * - For each renderpass we calculate the number of samples passed
++ *   by storing the number before and after in GPU memory.
++ * - To store the values each command buffer holds GPU memory which
++ *   expands with more renderpasses being written.
++ * - For each renderpass we create tu_renderpass_result entry which
++ *   points to the results in GPU memory.
++ *   - Later on tu_renderpass_result would be added to the
++ *     tu_renderpass_history entry which aggregate results for a
++ *     given renderpass.
++ * - On submission:
++ *   - Process results which fence was signalled.
++ *   - Free per-submission data which we now don't need.
++ *
++ *   - Create a command stream to write a fence value. This way we would
++ *     know when we could safely read the results.
++ *   - We cannot rely on the command buffer's lifetime when referencing
++ *     its resources since the buffer could be destroyed before we process
++ *     the results.
++ *   - For each command buffer:
++ *     - Reference its GPU memory.
++ *     - Move if ONE_TIME_SUBMIT or copy all tu_renderpass_result to the queue.
++ *
++ * Since the command buffers could be recorded on different threads
++ * we have to maintaining some amount of locking history table,
++ * however we change the table only in a single thread at the submission
++ * time, so in most cases there will be no locking.
++ */
+ 
+-      mod_flags |= (uint8_t) f;
+-      update_metric_flags();
+-      return true;
+-   }
++void
++tu_autotune_free_results_locked(struct tu_device *dev, struct list_head *results);
+ 
+-   std::string to_string() const
+-   {
+-#define ALGO_STR(algo_name)                                                                                            \
+-   if (algo == algorithm::algo_name)                                                                                   \
+-      str += #algo_name;
+-#define MODF_STR(flag)                                                                                                 \
+-   if (mod_flags & (uint8_t) mod_flag::flag) {                                                                         \
+-      str += #flag " ";                                                                                                \
+-   }
+-#define METRICF_STR(flag)                                                                                              \
+-   if (metric_flags & (uint8_t) metric_flag::flag) {                                                                   \
+-      str += #flag " ";                                                                                                \
+-   }
++#define TU_AUTOTUNE_DEBUG_LOG 0
++/* Dump history entries on autotuner finish,
++ * could be used to gather data from traces.
++ */
++#define TU_AUTOTUNE_LOG_AT_FINISH 0
+ 
+-      std::string str = "Algorithm: ";
++/* How many last renderpass stats are taken into account. */
++#define MAX_HISTORY_RESULTS 5
++/* For how many submissions we store renderpass stats. */
++#define MAX_HISTORY_LIFETIME 128
+ 
+-      ALGO_STR(BANDWIDTH);
+ 
+-      str += ", Mod Flags: 0x" + std::to_string(mod_flags) + " (";
+-      MODF_STR(BIG_GMEM);
+-      MODF_STR(SMALL_SYSMEM);
+-      str += ")";
++/**
++ * Tracks results for a given renderpass key
++ */
++struct tu_renderpass_history {
++   uint64_t key;
+ 
+-      str += ", Metric Flags: 0x" + std::to_string(metric_flags) + " (";
+-      METRICF_STR(SAMPLES);
+-      str += ")";
++   /* We would delete old history entries */
++   uint32_t last_fence;
+ 
+-      return str;
++   /**
++    * List of recent fd_renderpass_result's
++    */
++   struct list_head results;
++   uint32_t num_results;
+ 
+-#undef ALGO_STR
+-#undef MODF_STR
+-#undef METRICF_STR
+-   }
++   uint32_t avg_samples;
+ };
+ 
+-union PACKED tu_autotune::packed_config_t {
+-   config_t config;
+-   uint32_t bits = 0;
+-   static_assert(sizeof(bits) >= sizeof(config));
+-   static_assert(std::is_trivially_copyable<config_t>::value,
+-                 "config_t must be trivially copyable to be automatically packed");
+-
+-   constexpr packed_config_t(config_t p_config): bits(0)
+-   {
+-      config = p_config; /* Set after bits(0) to avoid UB in sizeof(bits) > sizeof(config) case.*/
+-   }
++/* Holds per-submission cs which writes the fence. */
++struct tu_submission_data {
++   struct list_head node;
++   uint32_t fence;
+ 
+-   constexpr packed_config_t(uint32_t bits): bits(bits)
+-   {
+-   }
++   struct tu_cs fence_cs;
+ };
+ 
+-tu_autotune::atomic_config_t::atomic_config_t(config_t initial): config_bits(packed_config_t { initial }.bits)
+-{
+-}
+-
+-tu_autotune::config_t
+-tu_autotune::atomic_config_t::load() const
+-{
+-   return config_t(packed_config_t { config_bits.load(std::memory_order_relaxed) }.config);
+-}
+-
+-bool
+-tu_autotune::atomic_config_t::compare_and_store(config_t expected, config_t updated)
+-{
+-   uint32_t expected_bits = packed_config_t { expected }.bits;
+-   return config_bits.compare_exchange_strong(expected_bits, packed_config_t { updated }.bits,
+-                                              std::memory_order_acquire, std::memory_order_relaxed);
+-}
+-
+-tu_autotune::config_t
+-tu_autotune::get_env_config()
+-{
+-   static std::once_flag once;
+-   static config_t at_config;
+-   std::call_once(once, [&] {
+-      const char *algo_env_str = os_get_option("TU_AUTOTUNE_ALGO");
+-      algorithm algo = algorithm::DEFAULT;
+-
+-      if (algo_env_str) {
+-         std::string_view algo_strv(algo_env_str);
+-         if (algo_strv == "bandwidth") {
+-            algo = algorithm::BANDWIDTH;
+-         }
+-
+-         if (TU_DEBUG(STARTUP))
+-            mesa_logi("TU_AUTOTUNE_ALGO=%u (%s)", (uint8_t) algo, algo_env_str);
+-      }
+-
+-      /* Parse the flags from the environment variable. */
+-      const char *flags_env_str = os_get_option("TU_AUTOTUNE_FLAGS");
+-      uint32_t mod_flags = 0;
+-      if (flags_env_str) {
+-         static const struct debug_control tu_at_flags_control[] = {
+-            { "big_gmem", (uint32_t) mod_flag::BIG_GMEM },
+-            { "small_sysmem", (uint32_t) mod_flag::SMALL_SYSMEM },
+-            { NULL, 0 }
+-         };
+-
+-         mod_flags = parse_debug_string(flags_env_str, tu_at_flags_control);
+-         if (TU_DEBUG(STARTUP))
+-            mesa_logi("TU_AUTOTUNE_FLAGS=0x%x (%s)", mod_flags, flags_env_str);
+-      }
+-
+-      assert((uint8_t) mod_flags == mod_flags);
+-      at_config = config_t(algo, (uint8_t) mod_flags);
+-   });
+-
+-   if (TU_DEBUG(STARTUP))
+-      mesa_logi("TU_AUTOTUNE: %s", at_config.to_string().c_str());
+-
+-   return at_config;
+-}
+-
+-/** Global Fence and Internal CS Management **/
+-
+-tu_autotune::submission_entry::submission_entry(tu_device *device): fence(0)
+-{
+-   tu_cs_init(&fence_cs, device, TU_CS_MODE_GROW, 5, "autotune fence cs");
+-}
+-
+-tu_autotune::submission_entry::~submission_entry()
++static bool
++fence_before(uint32_t a, uint32_t b)
+ {
+-   assert(!is_active());
+-   tu_cs_finish(&fence_cs);
++   /* essentially a < b, but handle wrapped values */
++   return (int32_t)(a - b) < 0;
+ }
+ 
+-bool
+-tu_autotune::submission_entry::is_active() const
++static uint32_t
++get_autotune_fence(struct tu_autotune *at)
+ {
+-   return fence_cs.device->global_bo_map->autotune_fence < fence;
++   return at->device->global_bo_map->autotune_fence;
+ }
+ 
+ template <chip CHIP>
+ static void
+-write_fence_cs(struct tu_device *dev, struct tu_cs *cs, uint32_t fence)
++create_submission_fence(struct tu_device *dev,
++                        struct tu_cs *cs,
++                        uint32_t fence)
+ {
+    uint64_t dst_iova = dev->global_bo->iova + gb_offset(autotune_fence);
+    if (CHIP >= A7XX) {
+       tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 4);
+-      tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = CACHE_FLUSH_TS, .write_src = EV_WRITE_USER_32B, .write_dst = EV_DST_RAM,
+-                                       .write_enabled = true)
+-                        .value);
++      tu_cs_emit(cs,
++         CP_EVENT_WRITE7_0(.event = CACHE_FLUSH_TS,
++                           .write_src = EV_WRITE_USER_32B,
++                           .write_dst = EV_DST_RAM,
++                           .write_enabled = true).value);
+    } else {
+       tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 4);
+       tu_cs_emit(cs, CP_EVENT_WRITE_0_EVENT(CACHE_FLUSH_TS));
+@@ -316,747 +121,636 @@ write_fence_cs(struct tu_device *dev, struct tu_cs *cs, uint32_t fence)
+    tu_cs_emit(cs, fence);
+ }
+ 
+-struct tu_cs *
+-tu_autotune::submission_entry::try_get_cs(uint32_t new_fence)
++static struct tu_submission_data *
++create_submission_data(struct tu_device *dev, struct tu_autotune *at,
++                       uint32_t fence)
+ {
+-   if (is_active()) {
+-      /* If the CS is already active, we cannot write to it. */
+-      return nullptr;
++   struct tu_submission_data *submission_data = NULL;
++   if (!list_is_empty(&at->submission_data_pool)) {
++      submission_data = list_first_entry(&at->submission_data_pool,
++                                         struct tu_submission_data, node);
++      list_del(&submission_data->node);
++   } else {
++      submission_data = (struct tu_submission_data *) calloc(
++         1, sizeof(struct tu_submission_data));
++      tu_cs_init(&submission_data->fence_cs, dev, TU_CS_MODE_GROW, 5, "autotune fence cs");
+    }
++   submission_data->fence = fence;
++
++   struct tu_cs* fence_cs = &submission_data->fence_cs;
++   tu_cs_begin(fence_cs);
++   TU_CALLX(dev, create_submission_fence)(dev, fence_cs, fence);
++   tu_cs_end(fence_cs);
+ 
+-   struct tu_device *device = fence_cs.device;
+-   tu_cs_reset(&fence_cs);
+-   tu_cs_begin(&fence_cs);
+-   TU_CALLX(device, write_fence_cs)(device, &fence_cs, new_fence);
+-   tu_cs_end(&fence_cs);
+-   assert(fence_cs.entry_count == 1); /* We expect the initial allocation to be large enough. */
+-   fence = new_fence;
++   list_addtail(&submission_data->node, &at->pending_submission_data);
+ 
+-   return &fence_cs;
++   return submission_data;
+ }
+ 
+-struct tu_cs *
+-tu_autotune::get_cs_for_fence(uint32_t fence)
++static void
++finish_submission_data(struct tu_autotune *at,
++                       struct tu_submission_data *data)
+ {
+-   for (submission_entry &entry : submission_entries) {
+-      struct tu_cs *cs = entry.try_get_cs(fence);
+-      if (cs)
+-         return cs;
+-   }
+-
+-   /* If we reach here, we have to allocate a new entry. */
+-   submission_entry &entry = submission_entries.emplace_back(device);
+-   struct tu_cs *cs = entry.try_get_cs(fence);
+-   assert(cs); /* We just allocated it, so it should be available. */
+-   return cs;
++   list_del(&data->node);
++   list_addtail(&data->node, &at->submission_data_pool);
++   tu_cs_reset(&data->fence_cs);
+ }
+ 
+-/** RP Entry Management **/
+-
+-/* The part of the per-RP entry which is written by the GPU. */
+-struct PACKED tu_autotune::rp_gpu_data {
+-   /* HW requires the sample start/stop locations to be 128b aligned. */
+-   alignas(16) uint64_t samples_start;
+-   alignas(16) uint64_t samples_end;
+-   uint64_t ts_start;
+-   uint64_t ts_end;
+-};
+-
+-/* A small wrapper around rp_history to provide ref-counting and usage timestamps. */
+-struct tu_autotune::rp_history_handle {
+-   rp_history *history;
++static void
++free_submission_data(struct tu_submission_data *data)
++{
++   list_del(&data->node);
++   tu_cs_finish(&data->fence_cs);
+ 
+-   /* Note: Must be called with rp_mutex held. */
+-   rp_history_handle(rp_history &history);
++   free(data);
++}
+ 
+-   constexpr rp_history_handle(std::nullptr_t): history(nullptr)
+-   {
+-   }
++static uint64_t
++hash_renderpass_instance(const struct tu_render_pass *pass,
++                         const struct tu_framebuffer *framebuffer,
++                         const struct tu_cmd_buffer *cmd) {
++   uint32_t data[3 + pass->attachment_count * 5];
++   uint32_t* ptr = data;
+ 
+-   rp_history_handle(const rp_history_handle &) = delete;
+-   rp_history_handle &operator=(const rp_history_handle &) = delete;
++   *ptr++ = framebuffer->width;
++   *ptr++ = framebuffer->height;
++   *ptr++ = framebuffer->layers;
+ 
+-   constexpr rp_history_handle(rp_history_handle &&other): history(other.history)
+-   {
+-      other.history = nullptr;
++   for (unsigned i = 0; i < pass->attachment_count; i++) {
++      *ptr++ = cmd->state.attachments[i]->view.width;
++      *ptr++ = cmd->state.attachments[i]->view.height;
++      *ptr++ = cmd->state.attachments[i]->image->vk.format;
++      *ptr++ = cmd->state.attachments[i]->image->vk.array_layers;
++      *ptr++ = cmd->state.attachments[i]->image->vk.mip_levels;
+    }
+ 
+-   constexpr rp_history_handle &operator=(rp_history_handle &&other)
+-   {
+-      if (this != &other) {
+-         history = other.history;
+-         other.history = nullptr;
+-      }
+-      return *this;
+-   }
++   return XXH64(data, sizeof(data), pass->autotune_hash);
++}
+ 
+-   constexpr operator bool() const
+-   {
+-      return history != nullptr;
+-   }
++static void
++free_result(struct tu_device *dev, struct tu_renderpass_result *result)
++{
++   tu_suballoc_bo_free(&dev->autotune_suballoc, &result->bo);
++   list_del(&result->node);
++   free(result);
++}
+ 
+-   constexpr rp_history &operator*() const
+-   {
+-      assert(history);
+-      return *history;
+-   }
++static void
++free_history(struct tu_device *dev, struct tu_renderpass_history *history)
++{
++   tu_autotune_free_results_locked(dev, &history->results);
++   free(history);
++}
+ 
+-   constexpr operator rp_history *() const
+-   {
+-      return history;
+-   }
++static bool
++get_history(struct tu_autotune *at, uint64_t rp_key, uint32_t *avg_samples)
++{
++   bool has_history = false;
+ 
+-   constexpr rp_history *operator->() const
+-   {
+-      assert(history);
+-      return history;
++   /* If the lock contantion would be found in the wild -
++    * we could use try_lock here.
++    */
++   u_rwlock_rdlock(&at->ht_lock);
++   struct hash_entry *entry =
++      _mesa_hash_table_search(at->ht, &rp_key);
++   if (entry) {
++      struct tu_renderpass_history *history =
++         (struct tu_renderpass_history *) entry->data;
++      if (history->num_results > 0) {
++         *avg_samples = p_atomic_read(&history->avg_samples);
++         has_history = true;
++      }
+    }
++   u_rwlock_rdunlock(&at->ht_lock);
+ 
+-   ~rp_history_handle();
+-};
+-
+-/* An "entry" of renderpass autotune results, which is used to store the results of a renderpass autotune run for a
+- * given command buffer. */
+-struct tu_autotune::rp_entry {
+- private:
+-   struct tu_device *device;
+-
+-   struct tu_suballoc_bo bo;
+-   uint8_t *map; /* A direct pointer to the BO's CPU mapping. */
+-
+-   static_assert(alignof(rp_gpu_data) == 16);
+-   static_assert(offsetof(rp_gpu_data, samples_start) == 0);
+-   static_assert(offsetof(rp_gpu_data, samples_end) == 16);
+-
+- public:
+-   rp_history_handle history;
+-   config_t config; /* Configuration at the time of entry creation. */
+-   bool sysmem;
+-   uint32_t draw_count;
++   return has_history;
++}
+ 
+-   rp_entry(struct tu_device *device, rp_history_handle &&history, config_t config, uint32_t draw_count)
+-       : device(device), map(nullptr), history(std::move(history)), config(config), draw_count(draw_count)
+-   {
+-   }
++static struct tu_renderpass_result *
++create_history_result(struct tu_autotune *at, uint64_t rp_key)
++{
++   struct tu_renderpass_result *result =
++      (struct tu_renderpass_result *) calloc(1, sizeof(*result));
++   result->rp_key = rp_key;
+ 
+-   ~rp_entry()
+-   {
+-      if (map) {
+-         std::scoped_lock lock(device->autotune->suballoc_mutex);
+-         tu_suballoc_bo_free(&device->autotune->suballoc, &bo);
+-      }
+-   }
++   return result;
++}
+ 
+-   /* Disable the copy/move operators as that shouldn't be done. */
+-   rp_entry(const rp_entry &) = delete;
+-   rp_entry &operator=(const rp_entry &) = delete;
+-   rp_entry(rp_entry &&) = delete;
+-   rp_entry &operator=(rp_entry &&) = delete;
+-
+-   void allocate(bool sysmem)
+-   {
+-      this->sysmem = sysmem;
+-      size_t total_size = sizeof(rp_gpu_data);
+-
+-      std::scoped_lock lock(device->autotune->suballoc_mutex);
+-      VkResult result = tu_suballoc_bo_alloc(&bo, &device->autotune->suballoc, total_size, alignof(rp_gpu_data));
+-      if (result != VK_SUCCESS) {
+-         mesa_loge("Failed to allocate BO for autotune rp_entry: %u", result);
+-         return;
+-      }
++static void
++history_add_result(struct tu_device *dev, struct tu_renderpass_history *history,
++                      struct tu_renderpass_result *result)
++{
++   list_delinit(&result->node);
++   list_add(&result->node, &history->results);
+ 
+-      map = (uint8_t *) tu_suballoc_bo_map(&bo);
+-      memset(map, 0, total_size);
++   if (history->num_results < MAX_HISTORY_RESULTS) {
++      history->num_results++;
++   } else {
++      /* Once above the limit, start popping old results off the
++       * tail of the list:
++       */
++      struct tu_renderpass_result *old_result =
++         list_last_entry(&history->results, struct tu_renderpass_result, node);
++      mtx_lock(&dev->autotune_mutex);
++      free_result(dev, old_result);
++      mtx_unlock(&dev->autotune_mutex);
+    }
+ 
+-   rp_gpu_data &get_gpu_data()
+-   {
+-      assert(map);
+-      return *(rp_gpu_data *) map;
++   /* Do calculations here to avoid locking history in tu_autotune_use_bypass */
++   uint32_t total_samples = 0;
++   list_for_each_entry(struct tu_renderpass_result, result,
++                       &history->results, node) {
++      total_samples += result->samples_passed;
+    }
+ 
+-   /** Samples-Passed Metric **/
++   float avg_samples = (float)total_samples / (float)history->num_results;
++   p_atomic_set(&history->avg_samples, (uint32_t)avg_samples);
++}
+ 
+-   uint64_t get_samples_passed()
+-   {
+-      assert(config.test(metric_flag::SAMPLES));
+-      rp_gpu_data &gpu = get_gpu_data();
+-      return gpu.samples_end - gpu.samples_start;
+-   }
++static void
++process_results(struct tu_autotune *at, uint32_t current_fence)
++{
++   struct tu_device *dev = at->device;
+ 
+-   void emit_metric_samples_start(struct tu_cmd_buffer *cmd, struct tu_cs *cs, uint64_t start_iova)
+-   {
+-      tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_CNTL(.copy = true));
+-      if (cmd->device->physical_device->info->props.has_event_write_sample_count) {
+-         tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
+-         tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE, .write_sample_count = true).value);
+-         tu_cs_emit_qw(cs, start_iova);
+-
+-         /* If the renderpass contains an occlusion query with its own ZPASS_DONE, we have to provide a fake ZPASS_DONE
+-          * event here to logically close the previous one, preventing firmware from misbehaving due to nested events.
+-          * This writes into the samples_end field, which will be overwritten in tu_autotune_end_renderpass.
+-          */
+-         if (cmd->state.rp.has_zpass_done_sample_count_write_in_rp) {
+-            tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
+-            tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE, .write_sample_count = true,
+-                                             .sample_count_end_offset = true, .write_accum_sample_count_diff = true)
+-                              .value);
+-            tu_cs_emit_qw(cs, start_iova);
+-         }
+-      } else {
+-         tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_BASE(.qword = start_iova));
+-         tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 1);
+-         tu_cs_emit(cs, ZPASS_DONE);
+-      }
+-   }
++   list_for_each_entry_safe(struct tu_renderpass_result, result,
++                            &at->pending_results, node) {
++      if (fence_before(current_fence, result->fence))
++         break;
+ 
+-   void emit_metric_samples_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs, uint64_t start_iova, uint64_t end_iova)
+-   {
+-      tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_CNTL(.copy = true));
+-      if (cmd->device->physical_device->info->props.has_event_write_sample_count) {
+-         /* If the renderpass contains ZPASS_DONE events we emit a fake ZPASS_DONE event here, composing a pair of these
+-          * events that firmware handles without issue. This first event writes into the samples_end field and the
+-          * second event overwrites it. The second event also enables the accumulation flag even when we don't use that
+-          * result because the blob always sets it.
+-          */
+-         if (cmd->state.rp.has_zpass_done_sample_count_write_in_rp) {
+-            tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
+-            tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE, .write_sample_count = true).value);
+-            tu_cs_emit_qw(cs, end_iova);
+-         }
++      struct tu_renderpass_history *history = result->history;
++      result->samples_passed =
++         result->samples->samples_end - result->samples->samples_start;
+ 
+-         tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
+-         tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE, .write_sample_count = true,
+-                                          .sample_count_end_offset = true, .write_accum_sample_count_diff = true)
+-                           .value);
+-         tu_cs_emit_qw(cs, start_iova);
+-      } else {
+-         tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_BASE(.qword = end_iova));
+-         tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 1);
+-         tu_cs_emit(cs, ZPASS_DONE);
+-      }
++      history_add_result(dev, history, result);
+    }
+ 
+-   /** CS Emission **/
+-
+-   void emit_rp_start(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+-   {
+-      assert(map && bo.iova);
+-      uint64_t bo_iova = bo.iova;
+-      if (config.test(metric_flag::SAMPLES))
+-         emit_metric_samples_start(cmd, cs, bo_iova + offsetof(rp_gpu_data, samples_start));
+-   }
++   list_for_each_entry_safe(struct tu_submission_data, submission_data,
++                            &at->pending_submission_data, node) {
++      if (fence_before(current_fence, submission_data->fence))
++         break;
+ 
+-   void emit_rp_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+-   {
+-      assert(map && bo.iova);
+-      uint64_t bo_iova = bo.iova;
+-      if (config.test(metric_flag::SAMPLES))
+-         emit_metric_samples_end(cmd, cs, bo_iova + offsetof(rp_gpu_data, samples_start),
+-                                 bo_iova + offsetof(rp_gpu_data, samples_end));
++      finish_submission_data(at, submission_data);
+    }
+-};
+-
+-tu_autotune::rp_entry_batch::rp_entry_batch(): active(false), fence(0), entries()
+-{
+ }
+ 
+-void
+-tu_autotune::rp_entry_batch::assign_fence(uint32_t new_fence)
++static void
++queue_pending_results(struct tu_autotune *at, struct tu_cmd_buffer *cmdbuf)
+ {
+-   assert(!active); /* Cannot assign a fence to an active entry batch. */
+-   fence = new_fence;
+-   active = true;
+-}
++   bool one_time_submit = cmdbuf->usage_flags &
++         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+ 
+-void
+-tu_autotune::rp_entry_batch::mark_inactive()
+-{
+-   assert(active);
+-   active = false;
+-   fence = 0;
++   if (one_time_submit) {
++      /* We can just steal the list since it won't be resubmitted again */
++      list_splicetail(&cmdbuf->renderpass_autotune_results,
++                        &at->pending_results);
++      list_inithead(&cmdbuf->renderpass_autotune_results);
++   } else {
++      list_for_each_entry_safe(struct tu_renderpass_result, result,
++                              &cmdbuf->renderpass_autotune_results, node) {
++         /* TODO: copying each result isn't nice */
++         struct tu_renderpass_result *copy =
++            (struct tu_renderpass_result *) malloc(sizeof(*result));
++         *copy = *result;
++         tu_bo_get_ref(copy->bo.bo);
++         list_addtail(&copy->node, &at->pending_results);
++      }
++   }
+ }
+ 
+-/** Renderpass state tracking. **/
+-
+-tu_autotune::rp_key::rp_key(const struct tu_render_pass *pass,
+-                            const struct tu_framebuffer *framebuffer,
+-                            const struct tu_cmd_buffer *cmd)
++struct tu_cs *
++tu_autotune_on_submit(struct tu_device *dev,
++                      struct tu_autotune *at,
++                      struct tu_cmd_buffer **cmd_buffers,
++                      uint32_t cmd_buffer_count)
+ {
+-   /* Q: Why not make the key from framebuffer + renderpass pointers?
+-    * A: At least DXVK creates new framebuffers each frame while keeping renderpasses the same. Hashing the contents
+-    *    of the framebuffer and renderpass is more stable, and it maintains stability across runs, so we can reliably
+-    *    identify the same renderpass instance.
+-    */
++   /* We are single-threaded here */
+ 
+-   auto get_hash = [&](uint32_t *data, size_t size) {
+-      uint32_t *ptr = data;
+-      *ptr++ = framebuffer->width;
+-      *ptr++ = framebuffer->height;
+-      *ptr++ = framebuffer->layers;
+-
+-      for (unsigned i = 0; i < pass->attachment_count; i++) {
+-         *ptr++ = cmd->state.attachments[i]->view.width;
+-         *ptr++ = cmd->state.attachments[i]->view.height;
+-         *ptr++ = cmd->state.attachments[i]->image->vk.format;
+-         *ptr++ = cmd->state.attachments[i]->image->vk.array_layers;
+-         *ptr++ = cmd->state.attachments[i]->image->vk.mip_levels;
+-      }
++   const uint32_t gpu_fence = get_autotune_fence(at);
++   const uint32_t new_fence = at->fence_counter++;
+ 
+-      return XXH3_64bits(data, size * sizeof(uint32_t));
+-   };
++   process_results(at, gpu_fence);
+ 
+-   /* We do a manual Boost-style "small vector" optimization here where the stack is used for the vast majority of
+-    * cases, while only extreme cases need to allocate on the heap.
++   /* Create history entries here to minimize work and locking being
++    * done on renderpass end.
+     */
+-   size_t data_count = 3 + (pass->attachment_count * 5);
+-   constexpr size_t STACK_MAX_DATA_COUNT = 3 + (5 * 5); /* in u32 units. */
+-
+-   if (data_count <= STACK_MAX_DATA_COUNT) {
+-      /* If the data is small enough, we can use the stack. */
+-      std::array<uint32_t, STACK_MAX_DATA_COUNT> arr;
+-      hash = get_hash(arr.data(), data_count);
+-   } else {
+-      /* If the data is too large, we have to allocate it on the heap. */
+-      std::vector<uint32_t> vec(data_count);
+-      hash = get_hash(vec.data(), vec.size());
+-   }
+-}
+-
+-/* Exponential moving average (EMA) calculator for smoothing successive values of any metric. An alpha (smoothing
+- * factor) of 0.1 means 10% weight to new values (slow adaptation), while 0.9 means 90% weight (fast adaptation).
+- */
+-template <typename T = double> class exponential_average {
+- private:
+-   std::atomic<double> average = std::numeric_limits<double>::quiet_NaN();
+-   double alpha;
+-
+- public:
+-   explicit exponential_average(double alpha = 0.1) noexcept: alpha(alpha)
+-   {
+-   }
+-
+-   bool empty() const noexcept
+-   {
+-      double current = average.load(std::memory_order_relaxed);
+-      return std::isnan(current);
+-   }
+-
+-   void add(T value) noexcept
+-   {
+-      double v = static_cast<double>(value);
+-      double current = average.load(std::memory_order_relaxed);
+-      double new_avg;
+-      do {
+-         new_avg = std::isnan(current) ? v : (1.0 - alpha) * current + alpha * v;
+-      } while (!average.compare_exchange_weak(current, new_avg, std::memory_order_relaxed, std::memory_order_relaxed));
+-   }
++   for (uint32_t i = 0; i < cmd_buffer_count; i++) {
++      struct tu_cmd_buffer *cmdbuf = cmd_buffers[i];
++      list_for_each_entry_safe(struct tu_renderpass_result, result,
++                          &cmdbuf->renderpass_autotune_results, node) {
++         struct tu_renderpass_history *history;
++         struct hash_entry *entry =
++            _mesa_hash_table_search(at->ht, &result->rp_key);
++         if (!entry) {
++            history =
++               (struct tu_renderpass_history *) calloc(1, sizeof(*history));
++            history->key = result->rp_key;
++            list_inithead(&history->results);
++
++            u_rwlock_wrlock(&at->ht_lock);
++            _mesa_hash_table_insert(at->ht, &history->key, history);
++            u_rwlock_wrunlock(&at->ht_lock);
++         } else {
++            history = (struct tu_renderpass_history *) entry->data;
++         }
+ 
+-   void clear() noexcept
+-   {
+-      average.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
+-   }
++         history->last_fence = new_fence;
+ 
+-   T get() const noexcept
+-   {
+-      double current = average.load(std::memory_order_relaxed);
+-      return std::isnan(current) ? T {} : static_cast<T>(current);
++         result->fence = new_fence;
++         result->history = history;
++      }
+    }
+-};
+ 
+-/* All historical state pertaining to a uniquely identified RP. This integrates data from RP entries, accumulating
+- * metrics over the long-term and providing autotune algorithms using the data.
+- */
+-struct tu_autotune::rp_history {
+- public:
+-   uint64_t hash; /* The hash of the renderpass, just for debug output. */
++   struct tu_submission_data *submission_data =
++      create_submission_data(dev, at, new_fence);
+ 
+-   std::atomic<uint32_t> refcount = 0; /* Reference count to prevent deletion when active. */
+-   std::atomic<uint64_t> last_use_ts;  /* Last time the reference count was updated, in monotonic nanoseconds. */
++   for (uint32_t i = 0; i < cmd_buffer_count; i++) {
++      struct tu_cmd_buffer *cmdbuf = cmd_buffers[i];
++      if (list_is_empty(&cmdbuf->renderpass_autotune_results))
++         continue;
+ 
+-   rp_history(uint64_t hash): hash(hash), last_use_ts(os_time_get_nano())
+-   {
++      queue_pending_results(at, cmdbuf);
+    }
+ 
+-   /** Bandwidth Estimation Algorithm **/
+-   struct bandwidth_algo {
+-    private:
+-      exponential_average<uint32_t> mean_samples_passed;
++   if (TU_AUTOTUNE_DEBUG_LOG)
++      mesa_logi("Total history entries: %u", at->ht->entries);
+ 
+-    public:
+-      void update(uint32_t samples)
+-      {
+-         mean_samples_passed.add(samples);
+-      }
+-
+-      render_mode get_optimal_mode(rp_history &history,
+-                                   const struct tu_cmd_state *cmd_state,
+-                                   const struct tu_render_pass *pass,
+-                                   const struct tu_framebuffer *framebuffer,
+-                                   const struct tu_render_pass_state *rp_state)
+-      {
+-         uint32_t pass_pixel_count = 0;
+-         if (cmd_state->per_layer_render_area) {
+-            for (unsigned i = 0; i < cmd_state->pass->num_views; i++) {
+-               const VkExtent2D &extent = cmd_state->render_areas[i].extent;
+-               pass_pixel_count += extent.width * extent.height;
+-            }
+-         } else {
+-            const VkExtent2D &extent = cmd_state->render_areas[0].extent;
+-            pass_pixel_count =
+-               extent.width * extent.height * MAX2(cmd_state->pass->num_views, cmd_state->framebuffer->layers);
+-         }
+-
+-         uint64_t sysmem_bandwidth = (uint64_t) pass->sysmem_bandwidth_per_pixel * pass_pixel_count;
+-         uint64_t gmem_bandwidth = (uint64_t) pass->gmem_bandwidth_per_pixel * pass_pixel_count;
+-
+-         uint64_t total_draw_call_bandwidth = 0;
+-         uint64_t mean_samples = mean_samples_passed.get();
+-         if (rp_state->drawcall_count && mean_samples > 0.0) {
+-            /* The total draw call bandwidth is estimated as the average samples (collected via tracking samples passed
+-             * within the CS) multiplied by the drawcall bandwidth per sample, divided by the amount of draw calls.
+-             *
+-             * This is a rough estimate of the bandwidth used by the draw calls in the renderpass for FB writes which
+-             * is used to determine whether to use SYSMEM or GMEM.
+-             */
+-            total_draw_call_bandwidth =
+-               (mean_samples * rp_state->drawcall_bandwidth_per_sample_sum) / rp_state->drawcall_count;
+-         }
++   /* Cleanup old entries from history table. The assumption
++    * here is that application doesn't hold many old unsubmitted
++    * command buffers, otherwise this table may grow big.
++    */
++   hash_table_foreach(at->ht, entry) {
++      struct tu_renderpass_history *history =
++         (struct tu_renderpass_history *) entry->data;
++      if (fence_before(gpu_fence, history->last_fence + MAX_HISTORY_LIFETIME))
++         continue;
+ 
+-         /* Drawcalls access the memory in SYSMEM rendering (ignoring CCU). */
+-         sysmem_bandwidth += total_draw_call_bandwidth;
+-
+-         /* Drawcalls access GMEM in GMEM rendering, but we do not want to ignore them completely.  The state changes
+-          * between tiles also have an overhead.  The magic numbers of 11 and 10 are randomly chosen.
+-          */
+-         gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;
+-
+-         bool select_sysmem = sysmem_bandwidth <= gmem_bandwidth;
+-         render_mode mode = select_sysmem ? render_mode::SYSMEM : render_mode::GMEM;
+-
+-         UNUSED const VkExtent2D &extent = cmd_state->render_areas[0].extent;
+-         at_log_bandwidth_h(
+-            "%" PRIu32 " selecting %s\n"
+-            "   mean_samples=%" PRIu64 ", draw_bandwidth_per_sample=%.2f, total_draw_call_bandwidth=%" PRIu64
+-            ", render_areas[0]=%" PRIu32 "x%" PRIu32 ", sysmem_bandwidth_per_pixel=%" PRIu32
+-            ", gmem_bandwidth_per_pixel=%" PRIu32 ", sysmem_bandwidth=%" PRIu64 ", gmem_bandwidth=%" PRIu64,
+-            history.hash, rp_state->drawcall_count, render_mode_str(mode), mean_samples,
+-            (float) rp_state->drawcall_bandwidth_per_sample_sum / rp_state->drawcall_count, total_draw_call_bandwidth,
+-            extent.width, extent.height, pass->sysmem_bandwidth_per_pixel, pass->gmem_bandwidth_per_pixel,
+-            sysmem_bandwidth, gmem_bandwidth);
+-
+-         return mode;
+-      }
+-   } bandwidth;
++      if (TU_AUTOTUNE_DEBUG_LOG)
++         mesa_logi("Removed old history entry %016" PRIx64 "", history->key);
+ 
+-   void process(rp_entry &entry, tu_autotune &at)
+-   {
+-      /* We use entry config to know what metrics it has, autotune config to know what algorithms are enabled. */
+-      config_t entry_config = entry.config;
+-      config_t at_config = at.active_config.load();
++      u_rwlock_wrlock(&at->ht_lock);
++      _mesa_hash_table_remove_key(at->ht, &history->key);
++      u_rwlock_wrunlock(&at->ht_lock);
+ 
+-      if (entry_config.test(metric_flag::SAMPLES) && at_config.is_enabled(algorithm::BANDWIDTH))
+-         bandwidth.update(entry.get_samples_passed());
++      mtx_lock(&dev->autotune_mutex);
++      free_history(dev, history);
++      mtx_unlock(&dev->autotune_mutex);
+    }
+-};
+ 
+-tu_autotune::rp_history_handle::~rp_history_handle()
+-{
+-   if (!history)
+-      return;
+-
+-   history->last_use_ts.store(os_time_get_nano(), std::memory_order_relaxed);
+-   ASSERTED uint32_t old_refcount = history->refcount.fetch_sub(1, std::memory_order_relaxed);
+-   assert(old_refcount != 0); /* Underflow check. */
++   return &submission_data->fence_cs;
+ }
+ 
+-tu_autotune::rp_history_handle::rp_history_handle(rp_history &history): history(&history)
++static bool
++renderpass_key_equals(const void *_a, const void *_b)
+ {
+-   history.refcount.fetch_add(1, std::memory_order_relaxed);
+-   history.last_use_ts.store(os_time_get_nano(), std::memory_order_relaxed);
++   return *(uint64_t *)_a == *(uint64_t *)_b;
+ }
+ 
+-tu_autotune::rp_history_handle
+-tu_autotune::find_rp_history(const rp_key &key)
++static uint32_t
++renderpass_key_hash(const void *_a)
+ {
+-   std::shared_lock lock(rp_mutex);
+-   auto it = rp_histories.find(key);
+-   if (it != rp_histories.end())
+-      return rp_history_handle(it->second);
+-
+-   return rp_history_handle(nullptr);
++   return *((uint64_t *) _a) & 0xffffffff;
+ }
+ 
+-tu_autotune::rp_history_handle
+-tu_autotune::find_or_create_rp_history(const rp_key &key)
++VkResult
++tu_autotune_init(struct tu_autotune *at, struct tu_device *dev)
+ {
+-   rp_history *existing = find_rp_history(key);
+-   if (existing)
+-      return *existing;
+-
+-   /* If we reach here, we have to create a new history. */
+-   std::unique_lock lock(rp_mutex);
+-   auto it = rp_histories.find(key);
+-   if (it != rp_histories.end())
+-      return it->second; /* Another thread created the history while we were waiting for the lock. */
+-   auto history = rp_histories.emplace(std::make_pair(key, key.hash));
+-   return rp_history_handle(history.first->second);
++   at->enabled = true;
++   at->device = dev;
++   at->ht = _mesa_hash_table_create(NULL,
++                                    renderpass_key_hash,
++                                    renderpass_key_equals);
++   u_rwlock_init(&at->ht_lock);
++
++   list_inithead(&at->pending_results);
++   list_inithead(&at->pending_submission_data);
++   list_inithead(&at->submission_data_pool);
++
++   /* start from 1 because tu6_global::autotune_fence is initialized to 0 */
++   at->fence_counter = 1;
++
++   return VK_SUCCESS;
+ }
+ 
+ void
+-tu_autotune::reap_old_rp_histories()
++tu_autotune_fini(struct tu_autotune *at, struct tu_device *dev)
+ {
+-   constexpr uint64_t REAP_INTERVAL_NS = 10'000'000'000; /* 10s */
+-   uint64_t now = os_time_get_nano();
+-   if (last_reap_ts + REAP_INTERVAL_NS > now)
+-      return;
+-   last_reap_ts = now;
+-
+-   constexpr size_t MAX_RP_HISTORIES = 1024; /* Not a hard limit, we might exceed this if there's many active RPs. */
+-   {
+-      /* Quicker non-unique lock, should hit this path mostly. */
+-      std::shared_lock lock(rp_mutex);
+-      if (rp_histories.size() <= MAX_RP_HISTORIES)
+-         return;
+-   }
++   if (TU_AUTOTUNE_LOG_AT_FINISH) {
++      while (!list_is_empty(&at->pending_results)) {
++         const uint32_t gpu_fence = get_autotune_fence(at);
++         process_results(at, gpu_fence);
++      }
+ 
+-   std::unique_lock lock(rp_mutex);
+-   size_t og_size = rp_histories.size();
+-   if (og_size <= MAX_RP_HISTORIES)
+-      return;
++      hash_table_foreach(at->ht, entry) {
++         struct tu_renderpass_history *history =
++            (struct tu_renderpass_history *) entry->data;
+ 
+-   std::vector<rp_histories_t::iterator> candidates;
+-   candidates.reserve(og_size);
+-   for (auto it = rp_histories.begin(); it != rp_histories.end(); ++it) {
+-      if (it->second.refcount.load(std::memory_order_relaxed) == 0)
+-         candidates.push_back(it);
++         mesa_logi("%016" PRIx64 " \tavg_passed=%u results=%u",
++                   history->key, history->avg_samples, history->num_results);
++      }
+    }
+ 
+-   size_t to_purge = std::min(candidates.size(), og_size - MAX_RP_HISTORIES);
+-   if (to_purge == 0) {
+-      at_log_base("no RP histories to reap at size %zu, all are active", og_size);
+-      return;
+-   }
++   tu_autotune_free_results(dev, &at->pending_results);
+ 
+-   /* Partition candidates by last use timestamp, oldest first. */
+-   auto partition_end = candidates.begin() + to_purge;
+-   if (to_purge < candidates.size()) {
+-      std::nth_element(candidates.begin(), partition_end, candidates.end(),
+-                       [](rp_histories_t::iterator a, rp_histories_t::iterator b) {
+-                          return a->second.last_use_ts.load(std::memory_order_relaxed) <
+-                                 b->second.last_use_ts.load(std::memory_order_relaxed);
+-                       });
++   mtx_lock(&dev->autotune_mutex);
++   hash_table_foreach(at->ht, entry) {
++      struct tu_renderpass_history *history =
++         (struct tu_renderpass_history *) entry->data;
++      free_history(dev, history);
+    }
++   mtx_unlock(&dev->autotune_mutex);
+ 
+-   for (auto it = candidates.begin(); it != partition_end; ++it) {
+-      rp_history &history = (*it)->second;
+-      if (history.refcount.load(std::memory_order_relaxed) == 0) {
+-         at_log_base("reaping RP history %016" PRIx64, history.hash);
+-         rp_histories.erase(*it);
+-      }
++   list_for_each_entry_safe(struct tu_submission_data, submission_data,
++                            &at->pending_submission_data, node) {
++      free_submission_data(submission_data);
+    }
+ 
+-   at_log_base("reaped old RP histories %zu -> %zu", og_size, rp_histories.size());
+-}
+-
+-void
+-tu_autotune::process_entries()
+-{
+-   uint32_t current_fence = device->global_bo_map->autotune_fence;
+-
+-   while (!active_batches.empty()) {
+-      auto &batch = active_batches.front();
+-      assert(batch->active);
+-
+-      if (fence_before(current_fence, batch->fence))
+-         break; /* Entries are allocated in sequence, next will be newer and
+-                   also fail so we can just directly break out of the loop. */
+-
+-      for (auto &entry : batch->entries)
+-         entry->history->process(*entry, *this);
+-
+-      batch->mark_inactive();
+-      active_batches.pop_front();
++   list_for_each_entry_safe(struct tu_submission_data, submission_data,
++                            &at->submission_data_pool, node) {
++      free_submission_data(submission_data);
+    }
+ 
+-   if (active_batches.size() > 10) {
+-      at_log_base("high amount of active batches: %zu, fence: %" PRIu32 " < %" PRIu32, active_batches.size(),
+-                  current_fence, active_batches.front()->fence);
+-   }
++   _mesa_hash_table_destroy(at->ht, NULL);
++   u_rwlock_destroy(&at->ht_lock);
+ }
+ 
+-struct tu_cs *
+-tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_count)
++bool
++tu_autotune_submit_requires_fence(struct tu_cmd_buffer **cmd_buffers,
++                                  uint32_t cmd_buffer_count)
+ {
+-
+-   /* This call occurs regularly and we are single-threaded here, so we use this opportunity to process any available
+-    * entries. It's also important that any entries are processed here because we always want to ensure that we've
+-    * processed all entries from prior CBs before we submit any new CBs with the same RP to the GPU.
+-    */
+-   process_entries();
+-   reap_old_rp_histories();
+-
+-   bool has_results = false;
+    for (uint32_t i = 0; i < cmd_buffer_count; i++) {
+-      auto &batch = cmd_buffers[i]->autotune_ctx.batch;
+-      if (!batch->entries.empty()) {
+-         has_results = true;
+-         break;
+-      }
+-   }
+-   if (!has_results)
+-      return nullptr; /* No results to process, return early. */
+-
+-   /* Generate a new fence and the CS for it. */
+-   const uint32_t new_fence = next_fence++;
+-   auto fence_cs = get_cs_for_fence(new_fence);
+-   for (uint32_t i = 0; i < cmd_buffer_count; i++) {
+-      /* Transfer the entries from the command buffers to the active queue. */
+       struct tu_cmd_buffer *cmdbuf = cmd_buffers[i];
+-      auto &batch = cmdbuf->autotune_ctx.batch;
+-      if (batch->entries.empty())
+-         continue;
+-
+-      batch->assign_fence(new_fence);
+-      if (cmdbuf->usage_flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT) {
+-         /* If the command buffer is one-time submit, we can move the batch directly into the active batches, as it
+-          * won't be used again. This would lead to it being deallocated as early as possible.
+-          */
+-         active_batches.push_back(std::move(batch));
+-      } else {
+-         active_batches.push_back(batch);
+-      }
++      if (!list_is_empty(&cmdbuf->renderpass_autotune_results))
++         return true;
+    }
+ 
+-   return fence_cs;
++   return false;
+ }
+ 
+-tu_autotune::tu_autotune(struct tu_device *device, VkResult &result): device(device), active_config(get_env_config())
++void
++tu_autotune_free_results_locked(struct tu_device *dev, struct list_head *results)
+ {
+-   tu_bo_suballocator_init(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
++   list_for_each_entry_safe(struct tu_renderpass_result, result,
++                            results, node) {
++      free_result(dev, result);
++   }
++}
+ 
+-   result = VK_SUCCESS;
+-   return;
++void
++tu_autotune_free_results(struct tu_device *dev, struct list_head *results)
++{
++   mtx_lock(&dev->autotune_mutex);
++   tu_autotune_free_results_locked(dev, results);
++   mtx_unlock(&dev->autotune_mutex);
+ }
+ 
+-tu_autotune::~tu_autotune()
++static bool
++fallback_use_bypass(const struct tu_render_pass *pass,
++                    const struct tu_framebuffer *framebuffer,
++                    const struct tu_cmd_buffer *cmd_buffer)
+ {
+-   if (TU_AUTOTUNE_FLUSH_AT_FINISH) {
+-      while (!active_batches.empty())
+-         process_entries();
+-      at_log_base("finished processing all entries");
++   if (cmd_buffer->state.rp.drawcall_count > 5)
++      return false;
++
++   for (unsigned i = 0; i < pass->subpass_count; i++) {
++      if (pass->subpasses[i].samples != VK_SAMPLE_COUNT_1_BIT)
++         return false;
+    }
+ 
+-   tu_bo_suballocator_finish(&suballoc);
++   return true;
+ }
+ 
+-tu_autotune::cmd_buf_ctx::cmd_buf_ctx(): batch(std::make_shared<rp_entry_batch>())
++static uint32_t
++get_render_pass_pixel_count(const struct tu_cmd_buffer *cmd)
+ {
++   if (cmd->state.per_layer_render_area) {
++      uint32_t pixels = 0;
++      for (unsigned i = 0; i < cmd->state.pass->num_views; i++) {
++         const VkExtent2D *extent = &cmd->state.render_areas[i].extent;
++         pixels += extent->width * extent->height;
++      }
++      return pixels;
++   } else {
++      const VkExtent2D *extent = &cmd->state.render_areas[0].extent;
++      return extent->width * extent->height *
++         MAX2(cmd->state.pass->num_views, cmd->state.framebuffer->layers);
++   }
+ }
+ 
+-tu_autotune::cmd_buf_ctx::~cmd_buf_ctx()
++static uint64_t
++estimate_drawcall_bandwidth(const struct tu_cmd_buffer *cmd,
++                            uint32_t avg_renderpass_sample_count)
+ {
+-   /* This is empty but it causes the implicit destructor to be compiled within this compilation unit with access to
+-    * internal structures. Otherwise, we would need to expose the full definition of autotuner internals in the header
+-    * file, which is not desirable.
+-    */
+-}
++   const struct tu_cmd_state *state = &cmd->state;
+ 
+-void
+-tu_autotune::cmd_buf_ctx::reset()
+-{
+-   batch = std::make_shared<rp_entry_batch>();
+-}
++   if (!state->rp.drawcall_count)
++      return 0;
+ 
+-tu_autotune::rp_entry *
+-tu_autotune::cmd_buf_ctx::attach_rp_entry(struct tu_device *device,
+-                                          rp_history_handle &&history,
+-                                          config_t config,
+-                                          uint32_t drawcall_count)
+-{
+-   std::unique_ptr<rp_entry> &new_entry =
+-      batch->entries.emplace_back(std::make_unique<rp_entry>(device, std::move(history), config, drawcall_count));
+-   return new_entry.get();
++   /* sample count times drawcall_bandwidth_per_sample */
++   return (uint64_t)avg_renderpass_sample_count *
++      state->rp.drawcall_bandwidth_per_sample_sum / state->rp.drawcall_count;
+ }
+ 
+-tu_autotune::render_mode
+-tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx)
++bool
++tu_autotune_use_bypass(struct tu_autotune *at,
++                       struct tu_cmd_buffer *cmd_buffer,
++                       struct tu_renderpass_result **autotune_result)
+ {
+-   const struct tu_cmd_state *cmd_state = &cmd_buffer->state;
+-   const struct tu_render_pass *pass = cmd_state->pass;
+-   const struct tu_framebuffer *framebuffer = cmd_state->framebuffer;
+-   const struct tu_render_pass_state *rp_state = &cmd_state->rp;
+-   cmd_buf_ctx &cb_ctx = cmd_buffer->autotune_ctx;
+-   config_t config = active_config.load();
+-
+-   /* Just to ensure a segfault for accesses, in case we don't set it. */
+-   *rp_ctx = nullptr;
++   const struct tu_render_pass *pass = cmd_buffer->state.pass;
++   const struct tu_framebuffer *framebuffer = cmd_buffer->state.framebuffer;
+ 
+    /* If a feedback loop in the subpass caused one of the pipelines used to set
+-    * SINGLE_PRIM_MODE(FLUSH_PER_OVERLAP_AND_OVERWRITE) or even SINGLE_PRIM_MODE(FLUSH), then that should cause
+-    * significantly increased SYSMEM bandwidth (though we haven't quantified it).
++    * SINGLE_PRIM_MODE(FLUSH_PER_OVERLAP_AND_OVERWRITE) or even
++    * SINGLE_PRIM_MODE(FLUSH), then that should cause significantly increased
++    * sysmem bandwidth (though we haven't quantified it).
+     */
+-   if (rp_state->sysmem_single_prim_mode)
+-      return render_mode::GMEM;
+-
+-   /* If the user is using a fragment density map, then this will cause less FS invocations with GMEM, which has a
+-    * hard-to-measure impact on performance because it depends on how heavy the FS is in addition to how many
+-    * invocations there were and the density. Let's assume the user knows what they're doing when they added the map,
+-    * because if SYSMEM is actually faster then they could've just not used the fragment density map.
++   if (cmd_buffer->state.rp.sysmem_single_prim_mode)
++      return false;
++
++   /* If the user is using a fragment density map, then this will cause less
++    * FS invocations with GMEM, which has a hard-to-measure impact on
++    * performance because it depends on how heavy the FS is in addition to how
++    * many invocations there were and the density. Let's assume the user knows
++    * what they're doing when they added the map, because if sysmem is
++    * actually faster then they could've just not used the fragment density
++    * map.
+     */
+    if (pass->has_fdm)
+-      return render_mode::GMEM;
++      return false;
+ 
+-   /* SYSMEM is always a safe default mode when we can't fully engage the autotuner. From testing, we know that for an
+-    * incorrect decision towards SYSMEM tends to be far less impactful than an incorrect decision towards GMEM, which
+-    * can cause significant performance issues.
++   /* For VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT buffers
++    * we would have to allocate GPU memory at the submit time and copy
++    * results into it.
++    * Native games ususally don't use it, Zink and DXVK don't use it,
++    * D3D12 doesn't have such concept.
+     */
+-   constexpr render_mode default_mode = render_mode::SYSMEM;
++   bool simultaneous_use =
++      cmd_buffer->usage_flags & VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+ 
+-   /* For VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT buffers, we would have to allocate GPU memory at the submit time
+-    * and copy results into it. We just disable complex autotuner in this case, which isn't a big issue since native
+-    * games usually don't use it, Zink and DXVK don't use it, while D3D12 doesn't even have such concept.
++   if (!at->enabled || simultaneous_use)
++      return fallback_use_bypass(pass, framebuffer, cmd_buffer);
++
++   /* We use 64bit hash as a key since we don't fear rare hash collision,
++    * the worst that would happen is sysmem being selected when it should
++    * have not, and with 64bit it would be extremely rare.
+     *
+-    * We combine this with processing entries at submit time, to avoid a race where the CPU hasn't processed the results
+-    * from an earlier submission of the CB while a second submission of the CB is on the GPU queue.
++    * Q: Why not make the key from framebuffer + renderpass pointers?
++    * A: At least DXVK creates new framebuffers each frame while keeping
++    *    renderpasses the same. Also we want to support replaying a single
++    *    frame in a loop for testing.
+     */
+-   bool simultaneous_use = cmd_buffer->usage_flags & VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+-
+-   if (!enabled || simultaneous_use)
+-      return default_mode;
+-
+-   if (config.test(mod_flag::BIG_GMEM) && rp_state->drawcall_count >= 10)
+-      return render_mode::GMEM;
+-   if (config.test(mod_flag::SMALL_SYSMEM) && rp_state->drawcall_count <= 5)
+-      return render_mode::SYSMEM;
+-
+-   rp_key key(pass, framebuffer, cmd_buffer);
+-   *rp_ctx = cb_ctx.attach_rp_entry(device, find_or_create_rp_history(key), config, rp_state->drawcall_count);
+-   rp_history &history = *((*rp_ctx)->history);
++   uint64_t renderpass_key = hash_renderpass_instance(pass, framebuffer, cmd_buffer);
++
++   *autotune_result = create_history_result(at, renderpass_key);
++
++   uint32_t avg_samples = 0;
++   if (get_history(at, renderpass_key, &avg_samples)) {
++      const uint32_t pass_pixel_count =
++         get_render_pass_pixel_count(cmd_buffer);
++      uint64_t sysmem_bandwidth =
++         (uint64_t)pass->sysmem_bandwidth_per_pixel * pass_pixel_count;
++      uint64_t gmem_bandwidth =
++         (uint64_t)pass->gmem_bandwidth_per_pixel * pass_pixel_count;
++
++      const uint64_t total_draw_call_bandwidth =
++         estimate_drawcall_bandwidth(cmd_buffer, avg_samples);
++
++      /* drawcalls access the memory in sysmem rendering (ignoring CCU) */
++      sysmem_bandwidth += total_draw_call_bandwidth;
++
++      /* drawcalls access gmem in gmem rendering, but we do not want to ignore
++       * them completely.  The state changes between tiles also have an
++       * overhead.  The magic numbers of 11 and 10 are randomly chosen.
++       */
++      gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;
++
++      const bool select_sysmem = sysmem_bandwidth <= gmem_bandwidth;
++      if (TU_AUTOTUNE_DEBUG_LOG) {
++         const VkExtent2D *extent = &cmd_buffer->state.render_areas[0].extent;
++         const float drawcall_bandwidth_per_sample =
++            (float)cmd_buffer->state.rp.drawcall_bandwidth_per_sample_sum /
++            cmd_buffer->state.rp.drawcall_count;
++
++         mesa_logi("autotune %016" PRIx64 ":%u selecting %s",
++               renderpass_key,
++               cmd_buffer->state.rp.drawcall_count,
++               select_sysmem ? "sysmem" : "gmem");
++         mesa_logi("   avg_samples=%u, draw_bandwidth_per_sample=%.2f, total_draw_call_bandwidth=%" PRIu64,
++               avg_samples,
++               drawcall_bandwidth_per_sample,
++               total_draw_call_bandwidth);
++         mesa_logi("   render_area=%ux%u, sysmem_bandwidth_per_pixel=%u, gmem_bandwidth_per_pixel=%u",
++               extent->width, extent->height,
++               pass->sysmem_bandwidth_per_pixel,
++               pass->gmem_bandwidth_per_pixel);
++         mesa_logi("   sysmem_bandwidth=%" PRIu64 ", gmem_bandwidth=%" PRIu64,
++               sysmem_bandwidth, gmem_bandwidth);
++      }
+ 
+-   if (config.is_enabled(algorithm::BANDWIDTH))
+-      return history.bandwidth.get_optimal_mode(history, cmd_state, pass, framebuffer, rp_state);
++      return select_sysmem;
++   }
+ 
+-   return default_mode;
++   return fallback_use_bypass(pass, framebuffer, cmd_buffer);
+ }
+ 
+-/** RP-level CS emissions **/
+-
++template <chip CHIP>
+ void
+-tu_autotune::begin_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx, bool sysmem)
++tu_autotune_begin_renderpass(struct tu_cmd_buffer *cmd,
++                             struct tu_cs *cs,
++                             struct tu_renderpass_result *autotune_result)
+ {
+-   if (!rp_ctx)
++   if (!autotune_result)
+       return;
+ 
+-   rp_ctx->allocate(sysmem);
+-   rp_ctx->emit_rp_start(cmd, cs);
++   struct tu_device *dev = cmd->device;
++
++   static const uint32_t size = sizeof(struct tu_renderpass_samples);
++
++   mtx_lock(&dev->autotune_mutex);
++   VkResult ret = tu_suballoc_bo_alloc(&autotune_result->bo, &dev->autotune_suballoc, size, size);
++   mtx_unlock(&dev->autotune_mutex);
++   if (ret != VK_SUCCESS) {
++      autotune_result->bo.iova = 0;
++      return;
++   }
++
++   uint64_t result_iova = autotune_result->bo.iova;
++
++   autotune_result->samples =
++      (struct tu_renderpass_samples *) tu_suballoc_bo_map(
++         &autotune_result->bo);
++
++   tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_CNTL(.copy = true));
++   if (cmd->device->physical_device->info->props.has_event_write_sample_count) {
++      tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
++      tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE,
++                                       .write_sample_count = true).value);
++      tu_cs_emit_qw(cs, result_iova);
++
++      /* If the renderpass contains an occlusion query with its own ZPASS_DONE,
++       * we have to provide a fake ZPASS_DONE event here to logically close the
++       * previous one, preventing firmware from misbehaving due to nested events.
++       * This writes into the samples_end field, which will be overwritten in
++       * tu_autotune_end_renderpass.
++       */
++      if (cmd->state.rp.has_zpass_done_sample_count_write_in_rp) {
++         tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
++         tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE,
++                                          .write_sample_count = true,
++                                          .sample_count_end_offset = true,
++                                          .write_accum_sample_count_diff = true).value);
++         tu_cs_emit_qw(cs, result_iova);
++      }
++   } else {
++      tu_cs_emit_regs(cs,
++                        A6XX_RB_SAMPLE_COUNTER_BASE(.qword = result_iova));
++      tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 1);
++      tu_cs_emit(cs, ZPASS_DONE);
++   }
+ }
++TU_GENX(tu_autotune_begin_renderpass);
+ 
+-void
+-tu_autotune::end_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx)
++template <chip CHIP>
++void tu_autotune_end_renderpass(struct tu_cmd_buffer *cmd,
++                                struct tu_cs *cs,
++                                struct tu_renderpass_result *autotune_result)
+ {
+-   if (!rp_ctx)
++   if (!autotune_result)
++      return;
++
++   if (!autotune_result->bo.iova)
+       return;
+ 
+-   rp_ctx->emit_rp_end(cmd, cs);
++   uint64_t result_iova = autotune_result->bo.iova;
++
++   tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_CNTL(.copy = true));
++
++   if (cmd->device->physical_device->info->props.has_event_write_sample_count) {
++      /* If the renderpass contains ZPASS_DONE events we emit a fake ZPASS_DONE
++       * event here, composing a pair of these events that firmware handles without
++       * issue. This first event writes into the samples_end field and the second
++       * event overwrites it. The second event also enables the accumulation flag
++       * even when we don't use that result because the blob always sets it.
++       */
++      if (cmd->state.rp.has_zpass_done_sample_count_write_in_rp) {
++         tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
++         tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE,
++                                          .write_sample_count = true).value);
++         tu_cs_emit_qw(cs, result_iova + offsetof(struct tu_renderpass_samples, samples_end));
++      }
++
++      tu_cs_emit_pkt7(cs, CP_EVENT_WRITE7, 3);
++      tu_cs_emit(cs, CP_EVENT_WRITE7_0(.event = ZPASS_DONE,
++                                       .write_sample_count = true,
++                                       .sample_count_end_offset = true,
++                                       .write_accum_sample_count_diff = true).value);
++      tu_cs_emit_qw(cs, result_iova);
++   } else {
++      result_iova += offsetof(struct tu_renderpass_samples, samples_end);
++
++      tu_cs_emit_regs(cs,
++                        A6XX_RB_SAMPLE_COUNTER_BASE(.qword = result_iova));
++      tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 1);
++      tu_cs_emit(cs, ZPASS_DONE);
++   }
+ }
++TU_GENX(tu_autotune_end_renderpass);
+diff --git a/src/freedreno/vulkan/tu_autotune.h b/src/freedreno/vulkan/tu_autotune.h
+index 1dc966a20e9..47a26faee67 100644
+--- a/src/freedreno/vulkan/tu_autotune.h
++++ b/src/freedreno/vulkan/tu_autotune.h
+@@ -6,237 +6,150 @@
+ #ifndef TU_AUTOTUNE_H
+ #define TU_AUTOTUNE_H
+ 
+-#include <atomic>
+-#include <deque>
+-#include <memory>
+-#include <mutex>
+-#include <shared_mutex>
+-#include <unordered_map>
+-#include <vector>
+-
+-#include "tu_cs.h"
++#include "util/hash_table.h"
++#include "util/rwlock.h"
++
+ #include "tu_suballoc.h"
+ 
+-/* Autotune allows for us to tune rendering parameters (such as GMEM vs SYSMEM, tile size divisor, etc.) based on
+- * dynamic analysis of the rendering workload via on-GPU profiling. This lets us make much better decisions than static
+- * analysis, since we can adapt to the actual workload rather than relying on heuristics.
++struct tu_renderpass_history;
++
++/**
++ * "autotune" our decisions about bypass vs GMEM rendering, based on historical
++ * data about a given render target.
++ *
++ * In deciding which path to take there are tradeoffs, including some that
++ * are not reasonably estimateable without having some additional information:
++ *
++ *  (1) If you know you are touching every pixel (ie. there is a clear),
++ *      then the GMEM path will at least not cost more memory bandwidth than
++ *      sysmem[1]
++ *
++ *  (2) If there is no clear, GMEM could potentially cost *more* bandwidth
++ *      if there is sysmem->GMEM restore pass.
++ *
++ *  (3) If you see a high draw count, that is an indication that there will be
++ *      enough pixels accessed multiple times to benefit from the reduced
++ *      memory bandwidth that GMEM brings
++ *
++ *  (4) But high draw count where there is not much overdraw can actually be
++ *      faster in bypass mode if it is pushing a lot of state change, due to
++ *      not having to go thru the state changes per-tile[1]
++ *
++ * The approach taken is to measure the samples-passed for the batch to estimate
++ * the amount of overdraw to detect cases where the number of pixels touched is
++ * low.
++ *
++ * [1] ignoring early-tile-exit optimizations, but any draw that touches all/
++ *     most of the tiles late in the tile-pass can defeat that
+  */
+ struct tu_autotune {
+- private:
+-   bool enabled = true;
+-   struct tu_device *device;
+-
+-   /** Configuration **/
+-
+-   enum class algorithm : uint8_t;
+-   enum class mod_flag : uint8_t;
+-   enum class metric_flag : uint8_t;
+-   /* Container for all autotune configuration options. */
+-   struct PACKED config_t;
+-   union PACKED packed_config_t;
+-
+-   /* Allows for thread-safe access to the configurations. */
+-   struct atomic_config_t {
+-    private:
+-      std::atomic<uint32_t> config_bits = 0;
+-
+-    public:
+-      atomic_config_t(config_t initial_config);
+-
+-      config_t load() const;
+-
+-      bool compare_and_store(config_t expected, config_t updated);
+-   } active_config;
+-
+-   config_t get_env_config();
+-
+-   /** Global Fence and Internal CS Management **/
+ 
+-   /* BO suballocator for reducing BO management for small GMEM/SYSMEM autotune result buffers.
+-    * Synchronized by suballoc_mutex.
++   /* We may have to disable autotuner if there are too many
++    * renderpasses in-flight.
+     */
+-   struct tu_suballocator suballoc;
+-   std::mutex suballoc_mutex;
++   bool enabled;
+ 
+-   /* The next value to assign to tu6_global::autotune_fence, this is incremented during on_submit. */
+-   uint32_t next_fence = 1;
++   struct tu_device *device;
+ 
+-   /* A wrapper around a CS which sets the global autotune fence to a certain fence value, this allows for ergonomically
+-    * managing the lifetime of the CS including recycling it after the fence value has been reached.
++   /**
++    * Cache to map renderpass key to historical information about
++    * rendering to that particular render target.
+     */
+-   struct submission_entry {
+-    private:
+-      uint32_t fence;
+-      struct tu_cs fence_cs;
+-
+-    public:
+-      explicit submission_entry(tu_device *device);
+-
+-      ~submission_entry();
+-
+-      /* Disable move/copy, since this holds stable pointers to the fence_cs. */
+-      submission_entry(const submission_entry &) = delete;
+-      submission_entry &operator=(const submission_entry &) = delete;
+-      submission_entry(submission_entry &&) = delete;
+-      submission_entry &operator=(submission_entry &&) = delete;
+-
+-      /* The current state of the submission entry, this is used to track whether the CS is available for reuse, pending
+-       * GPU completion or currently being processed.
+-       */
+-      bool is_active() const;
++   struct hash_table *ht;
++   struct u_rwlock ht_lock;
+ 
+-      /* If the CS is free, returns the CS which will write out the specified fence value. Otherwise, returns nullptr. */
+-      struct tu_cs *try_get_cs(uint32_t new_fence);
+-   };
+-
+-   /* Unified pool for submission CSes.
+-    * Note: This is a deque rather than a vector due to the lack of move semantics in the submission_entry.
++   /**
++    * List of per-renderpass results that we are waiting for the GPU
++    * to finish with before reading back the results.
+     */
+-   std::deque<submission_entry> submission_entries;
+-
+-   /* Returns a CS which will write out the specified fence value to the global BO's autotune fence. */
+-   struct tu_cs *get_cs_for_fence(uint32_t fence);
+-
+-   /** RP Entry Management **/
+-
+-   struct rp_gpu_data;
+-   struct tile_gpu_data;
+-   struct rp_entry;
++   struct list_head pending_results;
+ 
+-   /* A wrapper over all entries associated with a single command buffer. */
+-   struct rp_entry_batch {
+-      bool active;    /* If the entry is ready to be processed, i.e. the entry is submitted to the GPU queue and has a
+-                         valid fence. */
+-      uint32_t fence; /* The fence value which is used to signal the completion of the CB submission. This is used to
+-                         determine when the entries can be processed. */
+-      std::vector<std::unique_ptr<rp_entry>> entries;
+-
+-      rp_entry_batch();
+-
+-      /* Disable the copy/move to avoid performance hazards. */
+-      rp_entry_batch(const rp_entry_batch &) = delete;
+-      rp_entry_batch &operator=(const rp_entry_batch &) = delete;
+-      rp_entry_batch(rp_entry_batch &&) = delete;
+-      rp_entry_batch &operator=(rp_entry_batch &&) = delete;
+-
+-      void assign_fence(uint32_t new_fence);
+-
+-      void mark_inactive();
+-   };
+-
+-   /* A deque of entry batches that are strongly ordered by the fence value that was written by the GPU, for efficient
+-    * iteration and to ensure that we process the entries in the same order they were submitted.
++   /**
++    * List of per-submission data that we may want to free after we
++    * processed submission results.
++    * This could happend after command buffers which were in the submission
++    * are destroyed.
+     */
+-   std::deque<std::shared_ptr<rp_entry_batch>> active_batches;
++   struct list_head pending_submission_data;
+ 
+-   /* Handles processing of entry batches that are pending to be processed.
+-    *
+-    * Note: This must be called regularly to process the entries that have been written by the GPU. We currently do this
+-    *       in the on_submit() method, which is called on every submit of a command buffer.
++   /**
++    * List of per-submission data that has been finished and can be reused.
+     */
+-   void process_entries();
++   struct list_head submission_data_pool;
+ 
+-   /** Renderpass State Tracking **/
++   uint32_t fence_counter;
++   uint32_t idx_counter;
++};
+ 
+-   struct rp_history;
+-   struct rp_history_handle;
++/**
++ * From the cmdstream, the captured samples-passed values are recorded
++ * at the start and end of the batch.
++ *
++ * Note that we do the math on the CPU to avoid a WFI.  But pre-emption
++ * may force us to revisit that.
++ */
++struct PACKED tu_renderpass_samples {
++   uint64_t samples_start;
++   /* hw requires the sample start/stop locations to be 128b aligned. */
++   uint64_t __pad0;
++   uint64_t samples_end;
++   uint64_t __pad1;
++};
+ 
+-   /* A strongly typed key which generates a hash to uniquely identify a renderpass instance. This hash is expected to
+-    * be stable across runs, so it can be used to identify the same renderpass instance consistently.
+-    *
+-    * Note: We can potentially include the vector of data we extract from the parameters to generate the hash into
+-    *       rp_key, which would lead to true value-based equality rather than just hash-based equality which has a cost
+-    *       but avoids hash collisions causing issues.
+-    */
+-   struct rp_key {
+-      uint64_t hash;
+-
+-      rp_key(const struct tu_render_pass *pass,
+-             const struct tu_framebuffer *framebuffer,
+-             const struct tu_cmd_buffer *cmd);
+-
+-      /* Equality operator, used in unordered_map. */
+-      constexpr bool operator==(const rp_key &other) const noexcept
+-      {
+-         return hash == other.hash;
+-      }
+-   };
+-
+-   /* A thin wrapper to satisfy C++'s Hash named requirement for rp_key.
+-    *
+-    * Note: This should *NEVER* be used to calculate the hash itself as it would lead to the hash being calculated
+-    *       multiple times, rather than being calculated once and reused when there's multiple successive lookups like
+-    *       with find_or_create_rp_history() and providing the hash to the rp_history constructor.
+-    */
+-   struct rp_hash {
+-      constexpr size_t operator()(const rp_key &key) const noexcept
+-      {
+-         /* Note: This will throw away the upper 32-bits on 32-bit architectures. */
+-         return static_cast<size_t>(key.hash);
+-      }
+-   };
+-
+-   /* A map between the hash of an RP and the historical state of the RP. Synchronized by rp_mutex. */
+-   using rp_histories_t = std::unordered_map<rp_key, rp_history, rp_hash>;
+-   rp_histories_t rp_histories;
+-   std::shared_mutex rp_mutex;
+-   uint64_t last_reap_ts = 0;
+-
+-   /* Note: These will internally lock rp_mutex internally, no need to lock it. */
+-   rp_history_handle find_rp_history(const rp_key &key);
+-   rp_history_handle find_or_create_rp_history(const rp_key &key);
+-   void reap_old_rp_histories();
+-
+- public:
+-   tu_autotune(struct tu_device *device, VkResult &result);
+-
+-   ~tu_autotune();
+-
+-   /* Opaque pointer to internal structure with RP context that needs to be preserved across begin/end calls. */
+-   using rp_ctx_t = rp_entry *;
+-
+-   /* An internal structure that needs to be held by tu_cmd_buffer to track the state of the autotuner for a given CB.
+-    *
+-    * Note: tu_cmd_buffer is only responsible for the lifetime of this object, all the access to the context state is
+-    *       done through tu_autotune.
+-    */
+-   struct cmd_buf_ctx {
+-    private:
+-      /* A batch of all entries from RPs within this CB. */
+-      std::shared_ptr<rp_entry_batch> batch;
++/* Necessary when writing sample counts using CP_EVENT_WRITE7::ZPASS_DONE. */
++static_assert(offsetof(struct tu_renderpass_samples, samples_end) == 16);
+ 
+-      /* Creates a new RP entry attached to this CB. */
+-      rp_entry *
+-      attach_rp_entry(struct tu_device *device, rp_history_handle &&history, config_t config, uint32_t draw_count);
++/**
++ * Tracks the results from an individual renderpass. Initially created
++ * per renderpass, and appended to the tail of at->pending_results. At a later
++ * time, when the GPU has finished writing the results, we fill samples_passed.
++ */
++struct tu_renderpass_result {
++   /* Points into GPU memory */
++   struct tu_renderpass_samples* samples;
+ 
+-      friend struct tu_autotune;
++   struct tu_suballoc_bo bo;
+ 
+-    public:
+-      cmd_buf_ctx();
+-      ~cmd_buf_ctx();
++   /*
++    * Below here, only used internally within autotune
++    */
++   uint64_t rp_key;
++   struct tu_renderpass_history *history;
++   struct list_head node;
++   uint32_t fence;
++   uint64_t samples_passed;
++};
+ 
+-      /* Resets the internal context, should be called when tu_cmd_buffer state has been reset. */
+-      void reset();
+-   };
++VkResult tu_autotune_init(struct tu_autotune *at, struct tu_device *dev);
++void tu_autotune_fini(struct tu_autotune *at, struct tu_device *dev);
+ 
+-   enum class render_mode {
+-      SYSMEM,
+-      GMEM,
+-   };
++bool tu_autotune_use_bypass(struct tu_autotune *at,
++                            struct tu_cmd_buffer *cmd_buffer,
++                            struct tu_renderpass_result **autotune_result);
++void tu_autotune_free_results(struct tu_device *dev, struct list_head *results);
+ 
+-   render_mode get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx);
++bool tu_autotune_submit_requires_fence(struct tu_cmd_buffer **cmd_buffers,
++                                       uint32_t cmd_buffer_count);
+ 
+-   void begin_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx, bool sysmem);
++/**
++ * A magic 8-ball that tells the gmem code whether we should do bypass mode
++ * for moar fps.
++ */
++struct tu_cs *tu_autotune_on_submit(struct tu_device *dev,
++                                    struct tu_autotune *at,
++                                    struct tu_cmd_buffer **cmd_buffers,
++                                    uint32_t cmd_buffer_count);
+ 
+-   void end_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx);
++struct tu_autotune_results_buffer;
+ 
+-   /* The submit-time hook for autotuner, this may return a CS (can be NULL) which must be amended for autotuner
+-    * tracking to function correctly.
+-    *
+-    * Note: This must be called from a single-threaded context. There should never be multiple threads calling this
+-    *       function at the same time.
+-    */
+-   struct tu_cs *on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_count);
+-};
++template <chip CHIP>
++void tu_autotune_begin_renderpass(struct tu_cmd_buffer *cmd,
++                                  struct tu_cs *cs,
++                                  struct tu_renderpass_result *autotune_result);
++
++template <chip CHIP>
++void tu_autotune_end_renderpass(struct tu_cmd_buffer *cmd,
++                                struct tu_cs *cs,
++                                struct tu_renderpass_result *autotune_result);
+ 
+-#endif /* TU_AUTOTUNE_H */
+\ No newline at end of file
++#endif /* TU_AUTOTUNE_H */
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 3fe6be1976d..a1a09f878cf 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -17,7 +17,6 @@
+ #include "common/freedreno_gpu_event.h"
+ #include "common/freedreno_lrz.h"
+ #include "common/freedreno_vrs.h"
+-#include "tu_autotune.h"
+ #include "tu_buffer.h"
+ #include "tu_clear_blit.h"
+ #include "tu_cs.h"
+@@ -1318,7 +1317,7 @@ use_hw_binning(struct tu_cmd_buffer *cmd)
+ 
+ static bool
+ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
+-                     tu_autotune::rp_ctx_t *rp_ctx)
++                     struct tu_renderpass_result **autotune_result)
+ {
+    if (TU_DEBUG(SYSMEM)) {
+       cmd->state.rp.gmem_disable_reason = "TU_DEBUG(SYSMEM)";
+@@ -1379,9 +1378,15 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
+    if (TU_DEBUG(GMEM))
+       return false;
+ 
+-   bool use_sysmem = cmd->device->autotune->get_optimal_mode(cmd, rp_ctx) == tu_autotune::render_mode::SYSMEM;
+-   if (use_sysmem)
++   bool use_sysmem = tu_autotune_use_bypass(&cmd->device->autotune,
++                                            cmd, autotune_result);
++   if (*autotune_result) {
++      list_addtail(&(*autotune_result)->node, &cmd->renderpass_autotune_results);
++   }
++
++   if (use_sysmem) {
+       cmd->state.rp.gmem_disable_reason = "Autotune selected sysmem";
++   }
+ 
+    return use_sysmem;
+ }
+@@ -3126,7 +3131,7 @@ tu7_emit_concurrent_binning_sysmem(struct tu_cmd_buffer *cmd,
+ template <chip CHIP>
+ static void
+ tu6_sysmem_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+-                        tu_autotune::rp_ctx_t rp_ctx)
++                        struct tu_renderpass_result *autotune_result)
+ {
+    const struct tu_framebuffer *fb = cmd->state.framebuffer;
+ 
+@@ -3179,7 +3184,7 @@ tu6_sysmem_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+       tu_cs_emit_regs(cs, RB_BIN_FOVEAT(CHIP));
+    }
+ 
+-   cmd->device->autotune->begin_renderpass(cmd, cs, rp_ctx, true);
++   tu_autotune_begin_renderpass<CHIP>(cmd, cs, autotune_result);
+ 
+    tu_cs_sanity_check(cs);
+ }
+@@ -3187,7 +3192,7 @@ tu6_sysmem_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+ template <chip CHIP>
+ static void
+ tu6_sysmem_render_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+-                      tu_autotune::rp_ctx_t rp_ctx)
++                      struct tu_renderpass_result *autotune_result)
+ {
+    /* Do any resolves of the last subpass. These are handled in the
+     * tile_store_cs in the gmem path.
+@@ -3227,7 +3232,7 @@ tu6_sysmem_render_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+       tu_cs_emit(cs, 0); /* value */
+    }
+ 
+-   cmd->device->autotune->end_renderpass(cmd, cs, rp_ctx);
++   tu_autotune_end_renderpass<CHIP>(cmd, cs, autotune_result);
+ 
+    tu_cs_sanity_check(cs);
+ }
+@@ -3377,7 +3382,7 @@ tu7_emit_concurrent_binning_gmem(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+ template <chip CHIP>
+ static void
+ tu6_tile_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+-                      tu_autotune::rp_ctx_t rp_ctx,
++                      struct tu_renderpass_result *autotune_result,
+                       const VkOffset2D *fdm_offsets)
+ {
+    struct tu_physical_device *phys_dev = cmd->device->physical_device;
+@@ -3556,7 +3561,7 @@ tu6_tile_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+    if (use_cb)
+       tu_trace_start_render_pass(cmd);
+ 
+-   cmd->device->autotune->begin_renderpass(cmd, cs, rp_ctx, false);
++   tu_autotune_begin_renderpass<CHIP>(cmd, cs, autotune_result);
+ 
+    tu_cs_sanity_check(cs);
+ }
+@@ -3619,7 +3624,7 @@ tu6_render_tile(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+ template <chip CHIP>
+ static void
+ tu6_tile_render_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+-                    tu_autotune::rp_ctx_t rp_ctx)
++                    struct tu_renderpass_result *autotune_result)
+ {
+    tu_cs_emit_call(cs, &cmd->draw_epilogue_cs);
+ 
+@@ -3649,7 +3654,7 @@ tu6_tile_render_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
+ 
+    tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_CLEAN_BLIT_CACHE);
+ 
+-   cmd->device->autotune->end_renderpass(cmd, cs, rp_ctx);
++   tu_autotune_end_renderpass<CHIP>(cmd, cs, autotune_result);
+ 
+    tu_cs_sanity_check(cs);
+ }
+@@ -3758,7 +3763,7 @@ tu_emit_subsampled(struct tu_cmd_buffer *cmd,
+ template <chip CHIP>
+ static void
+ tu_cmd_render_tiles(struct tu_cmd_buffer *cmd,
+-                    tu_autotune::rp_ctx_t rp_ctx,
++                    struct tu_renderpass_result *autotune_result,
+                     const VkOffset2D *fdm_offsets)
+ {
+    const struct tu_tiling_config *tiling = cmd->state.tiling;
+@@ -3799,7 +3804,7 @@ tu_cmd_render_tiles(struct tu_cmd_buffer *cmd,
+    tu6_emit_tile_store_cs<CHIP>(cmd, &cmd->tile_store_cs);
+    tu_cs_end(&cmd->tile_store_cs);
+ 
+-   tu6_tile_render_begin<CHIP>(cmd, &cmd->cs, rp_ctx, fdm_offsets);
++   tu6_tile_render_begin<CHIP>(cmd, &cmd->cs, autotune_result, fdm_offsets);
+ 
+    /* Note: we reverse the order of walking the pipes and tiles on every
+     * other row, to improve texture cache locality compared to raster order.
+@@ -3852,7 +3857,7 @@ tu_cmd_render_tiles(struct tu_cmd_buffer *cmd,
+       }
+    }
+ 
+-   tu6_tile_render_end<CHIP>(cmd, &cmd->cs, rp_ctx);
++   tu6_tile_render_end<CHIP>(cmd, &cmd->cs, autotune_result);
+ 
+    /* Outside of renderpasses we assume all draw states are disabled. We do
+     * this outside the draw CS for the normal case where 3d gmem stores aren't
+@@ -3885,7 +3890,7 @@ tu_cmd_render_tiles(struct tu_cmd_buffer *cmd,
+ template <chip CHIP>
+ static void
+ tu_cmd_render_sysmem(struct tu_cmd_buffer *cmd,
+-                     tu_autotune::rp_ctx_t rp_ctx)
++                     struct tu_renderpass_result *autotune_result)
+ {
+    VkResult result = tu_allocate_transient_attachments(cmd, true);
+ 
+@@ -3896,7 +3901,7 @@ tu_cmd_render_sysmem(struct tu_cmd_buffer *cmd,
+ 
+    tu_trace_start_render_pass(cmd);
+ 
+-   tu6_sysmem_render_begin<CHIP>(cmd, &cmd->cs, rp_ctx);
++   tu6_sysmem_render_begin<CHIP>(cmd, &cmd->cs, autotune_result);
+ 
+    trace_start_draw_ib_sysmem(&cmd->trace, &cmd->cs, cmd);
+ 
+@@ -3904,7 +3909,7 @@ tu_cmd_render_sysmem(struct tu_cmd_buffer *cmd,
+ 
+    trace_end_draw_ib_sysmem(&cmd->trace, &cmd->cs);
+ 
+-   tu6_sysmem_render_end<CHIP>(cmd, &cmd->cs, rp_ctx);
++   tu6_sysmem_render_end<CHIP>(cmd, &cmd->cs, autotune_result);
+ 
+    /* Outside of renderpasses we assume all draw states are disabled. */
+    tu_disable_draw_states(cmd, &cmd->cs);
+@@ -3924,11 +3929,11 @@ tu_cmd_render(struct tu_cmd_buffer *cmd_buffer,
+    if (cmd_buffer->state.rp.has_tess)
+       tu6_lazy_emit_tessfactor_addr<CHIP>(cmd_buffer);
+ 
+-   tu_autotune::rp_ctx_t rp_ctx = NULL;
+-   if (use_sysmem_rendering(cmd_buffer, &rp_ctx))
+-      tu_cmd_render_sysmem<CHIP>(cmd_buffer, rp_ctx);
++   struct tu_renderpass_result *autotune_result = NULL;
++   if (use_sysmem_rendering(cmd_buffer, &autotune_result))
++      tu_cmd_render_sysmem<CHIP>(cmd_buffer, autotune_result);
+    else
+-      tu_cmd_render_tiles<CHIP>(cmd_buffer, rp_ctx, fdm_offsets);
++      tu_cmd_render_tiles<CHIP>(cmd_buffer, autotune_result, fdm_offsets);
+ }
+ 
+ static void tu_reset_render_pass(struct tu_cmd_buffer *cmd_buffer)
+@@ -3994,7 +3999,7 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
+    u_trace_init(&cmd_buffer->rp_trace, &device->trace_context);
+    cmd_buffer->trace_renderpass_start =
+       u_trace_begin_iterator(&cmd_buffer->rp_trace);
+-   new (&cmd_buffer->autotune_ctx) tu_autotune::cmd_buf_ctx();
++   list_inithead(&cmd_buffer->renderpass_autotune_results);
+ 
+    if (TU_DEBUG_START(CHECK_CMD_BUFFER_STATUS)) {
+       cmd_buffer->status_bo = tu_cmd_buffer_setup_status_tracking(device);
+@@ -4043,7 +4048,7 @@ tu_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
+    u_trace_fini(&cmd_buffer->trace);
+    u_trace_fini(&cmd_buffer->rp_trace);
+ 
+-   cmd_buffer->autotune_ctx.~cmd_buf_ctx();
++   tu_autotune_free_results(cmd_buffer->device, &cmd_buffer->renderpass_autotune_results);
+ 
+    for (unsigned i = 0; i < MAX_BIND_POINTS; i++) {
+       if (cmd_buffer->descriptors[i].push_set.layout)
+@@ -4120,7 +4125,7 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+    tu_cs_reset(&cmd_buffer->pre_chain.draw_cs);
+    tu_cs_reset(&cmd_buffer->pre_chain.draw_epilogue_cs);
+ 
+-   cmd_buffer->autotune_ctx.reset();
++   tu_autotune_free_results(cmd_buffer->device, &cmd_buffer->renderpass_autotune_results);
+ 
+    for (unsigned i = 0; i < MAX_BIND_POINTS; i++) {
+       memset(&cmd_buffer->descriptors[i].sets, 0, sizeof(cmd_buffer->descriptors[i].sets));
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.h b/src/freedreno/vulkan/tu_cmd_buffer.h
+index 614747bb492..10e3198759b 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.h
++++ b/src/freedreno/vulkan/tu_cmd_buffer.h
+@@ -653,7 +653,8 @@ struct tu_cmd_buffer
+    struct u_trace_iterator trace_renderpass_start;
+    struct u_trace trace, rp_trace;
+ 
+-   tu_autotune::cmd_buf_ctx autotune_ctx;
++   struct list_head renderpass_autotune_results;
++   struct tu_autotune_results_buffer* autotune_buffer;
+ 
+    void *patchpoints_ctx;
+    struct util_dynarray fdm_bin_patchpoints;
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index fda649af6af..38da9a54ce2 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -2701,6 +2701,7 @@ tu_device_destroy_mutexes(struct tu_device *device)
+ {
+    mtx_destroy(&device->bo_mutex);
+    mtx_destroy(&device->pipeline_mutex);
++   mtx_destroy(&device->autotune_mutex);
+    mtx_destroy(&device->kgsl_profiling_mutex);
+    mtx_destroy(&device->event_mutex);
+    mtx_destroy(&device->trace_mutex);
+@@ -2814,6 +2815,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+ 
+    mtx_init(&device->bo_mutex, mtx_plain);
+    mtx_init(&device->pipeline_mutex, mtx_plain);
++   mtx_init(&device->autotune_mutex, mtx_plain);
+    mtx_init(&device->kgsl_profiling_mutex, mtx_plain);
+    mtx_init(&device->event_mutex, mtx_plain);
+    mtx_init(&device->trace_mutex, mtx_plain);
+@@ -2938,6 +2940,9 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+                                 TU_BO_ALLOC_ALLOW_DUMP |
+                                 TU_BO_ALLOC_INTERNAL_RESOURCE),
+       "pipeline_suballoc");
++   tu_bo_suballocator_init(&device->autotune_suballoc, device,
++                           128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
++                           "autotune_suballoc");
+    if (is_kgsl(physical_device->instance)) {
+       tu_bo_suballocator_init(&device->kgsl_profiling_suballoc, device,
+                               128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
+@@ -3085,9 +3090,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+    }
+    pthread_condattr_destroy(&condattr);
+ 
+-   device->autotune = new tu_autotune(device, result);
+-   if (result != VK_SUCCESS)
++   result = tu_autotune_init(&device->autotune, device);
++   if (result != VK_SUCCESS) {
+       goto fail_timeline_cond;
++   }
+ 
+    device->use_z24uint_s8uint =
+       physical_device->info->props.has_z24uint_s8uint &&
+@@ -3245,9 +3251,10 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+       free(device->dbg_renderpass_stomp_cs);
+    }
+ 
+-   delete device->autotune;
++   tu_autotune_fini(&device->autotune, device);
+ 
+    tu_bo_suballocator_finish(&device->pipeline_suballoc);
++   tu_bo_suballocator_finish(&device->autotune_suballoc);
+    tu_bo_suballocator_finish(&device->kgsl_profiling_suballoc);
+    tu_bo_suballocator_finish(&device->event_suballoc);
+    tu_bo_suballocator_finish(&device->vis_stream_suballocator);
+diff --git a/src/freedreno/vulkan/tu_device.h b/src/freedreno/vulkan/tu_device.h
+index 9665135e0e6..4518f6be6d6 100644
+--- a/src/freedreno/vulkan/tu_device.h
++++ b/src/freedreno/vulkan/tu_device.h
+@@ -13,7 +13,6 @@
+ #include "tu_common.h"
+ 
+ #include "radix_sort/radix_sort_vk.h"
+-#include "util/rwlock.h"
+ #include "util/u_vector.h"
+ #include "util/vma.h"
+ #include "vk_device_memory.h"
+@@ -266,12 +265,7 @@ struct tu6_global
+ 
+    volatile uint32_t vtx_stats_query_not_running;
+ 
+-   /* A fence with a monotonically increasing value that is
+-    * incremented by the GPU on each submission that includes
+-    * a tu_autotune::submission_entry CS. This is used to track
+-    * which submissions have been processed by the GPU before
+-    * processing the autotune packet on the CPU.
+-    */
++   /* To know when renderpass stats for autotune are valid */
+    volatile uint32_t autotune_fence;
+ 
+    /* For recycling command buffers for dynamic suspend/resume comamnds */
+@@ -360,6 +354,12 @@ struct tu_device
+    struct tu_suballocator pipeline_suballoc;
+    mtx_t pipeline_mutex;
+ 
++   /* Device-global BO suballocator for reducing BO management for small
++    * gmem/sysmem autotune result buffers.  Synchronized by autotune_mutex.
++    */
++   struct tu_suballocator autotune_suballoc;
++   mtx_t autotune_mutex;
++
+    /* KGSL requires a small chunk of GPU mem to retrieve raw GPU time on
+     * each submission.
+     */
+@@ -457,7 +457,7 @@ struct tu_device
+    pthread_cond_t timeline_cond;
+    pthread_mutex_t submit_mutex;
+ 
+-   struct tu_autotune *autotune;
++   struct tu_autotune autotune;
+ 
+    struct breadcrumbs_context *breadcrumbs_ctx;
+ 
+diff --git a/src/freedreno/vulkan/tu_pass.cc b/src/freedreno/vulkan/tu_pass.cc
+index 735707d8a1b..bad05d33406 100644
+--- a/src/freedreno/vulkan/tu_pass.cc
++++ b/src/freedreno/vulkan/tu_pass.cc
+@@ -549,6 +549,27 @@ tu_render_pass_disable_fdm(struct tu_device *dev, struct tu_render_pass *pass)
+    return false;
+ }
+ 
++static void
++tu_render_pass_calc_hash(struct tu_render_pass *pass)
++{
++   #define HASH(hash, data) XXH64(&(data), sizeof(data), hash)
++
++   uint64_t hash = HASH(0, pass->attachment_count);
++   hash = XXH64(pass->attachments,
++         pass->attachment_count * sizeof(pass->attachments[0]), hash);
++   hash = HASH(hash, pass->subpass_count);
++   for (unsigned i = 0; i < pass->subpass_count; i++) {
++      hash = HASH(hash, pass->subpasses[i].samples);
++      hash = HASH(hash, pass->subpasses[i].input_count);
++      hash = HASH(hash, pass->subpasses[i].color_count);
++      hash = HASH(hash, pass->subpasses[i].resolve_count);
++   }
++
++   pass->autotune_hash = hash;
++
++   #undef HASH
++}
++
+ static void
+ tu_render_pass_cond_config(struct tu_device *device,
+                            struct tu_render_pass *pass)
+@@ -1333,6 +1354,7 @@ tu_CreateRenderPass2(VkDevice _device,
+    tu_render_pass_gmem_config(pass, device->physical_device);
+    tu_render_pass_bandwidth_config(pass);
+    tu_render_pass_calc_views(pass);
++   tu_render_pass_calc_hash(pass);
+ 
+    for (unsigned i = 0; i < pCreateInfo->dependencyCount; ++i) {
+       tu_render_pass_add_subpass_dep(pass, &pCreateInfo->pDependencies[i]);
+@@ -1812,6 +1834,7 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
+    tu_render_pass_gmem_config(pass, device->physical_device);
+    tu_render_pass_bandwidth_config(pass);
+    tu_render_pass_calc_views(pass);
++   tu_render_pass_calc_hash(pass);
+ }
+ 
+ void
+diff --git a/src/freedreno/vulkan/tu_queue.cc b/src/freedreno/vulkan/tu_queue.cc
+index 97ea5701865..fd2257fbb49 100644
+--- a/src/freedreno/vulkan/tu_queue.cc
++++ b/src/freedreno/vulkan/tu_queue.cc
+@@ -418,7 +418,6 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
+    struct tu_device *device = queue->device;
+    bool u_trace_enabled = u_trace_should_process(&queue->device->trace_context);
+    struct util_dynarray dump_cmds;
+-   struct tu_cs *autotune_cs = NULL;
+ 
+    if (vk_submit->buffer_bind_count ||
+        vk_submit->image_bind_count ||
+@@ -496,8 +495,9 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
+       }
+    }
+ 
+-   autotune_cs = device->autotune->on_submit(cmd_buffers, cmdbuf_count);
+-   if (autotune_cs) {
++   if (tu_autotune_submit_requires_fence(cmd_buffers, cmdbuf_count)) {
++      struct tu_cs *autotune_cs = tu_autotune_on_submit(
++         device, &device->autotune, cmd_buffers, cmdbuf_count);
+       submit_add_entries(device, submit, &dump_cmds, autotune_cs->entries,
+                          autotune_cs->entry_count);
+    }
+-- 
+2.54.0
+

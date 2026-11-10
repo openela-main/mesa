@@ -1,0 +1,27 @@
+From 362798e015220647aa46361475b4af999ed90d22 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 11:41:20 +0200
+Subject: [PATCH 19/19] Fix is_perf_cntr_selectable in tu_device.cc
+
+Signed-off-by: Jocelyn Falempe <jfalempe@redhat.com>
+---
+ src/freedreno/vulkan/tu_device.cc | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 38da9a54ce2..bfc7f7c2ca8 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -1778,9 +1778,6 @@ tu_physical_device_init(struct tu_physical_device *device,
+ 
+    device->vk.pipeline_cache_import_ops = cache_import_ops;
+ 
+-   /* gen8 and onwards must use kernel UAPI for perfcntr management */
+-   device->is_perf_cntr_selectable &= (device->info->chip <= 7);
+-
+    return VK_SUCCESS;
+ 
+ fail_free_name:
+-- 
+2.54.0
+

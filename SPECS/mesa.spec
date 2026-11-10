@@ -3,7 +3,6 @@
 %global with_radeonsi 1
 %global with_vmware 1
 %global with_vulkan_hw 1
-%global with_vdpau 1
 %if !0%{?rhel}
 %global with_r300 1
 %global with_r600 1
@@ -52,7 +51,7 @@
 %if 0%{?with_asahi}
 %global asahi_platform_vulkan %{?with_vulkan_hw:,asahi}%{!?with_vulkan_hw:%{nil}}
 %endif
-%global extra_platform_vulkan %{?with_vulkan_hw:,broadcom,freedreno,panfrost,imagination-experimental}%{!?with_vulkan_hw:%{nil}}
+%global extra_platform_vulkan %{?with_vulkan_hw:,broadcom,freedreno,panfrost,imagination}%{!?with_vulkan_hw:%{nil}}
 %endif
 
 %if !0%{?rhel}
@@ -80,9 +79,9 @@
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-%global ver 25.2.7
+%global ver 26.1.1
 Version:        %{lua:ver = string.gsub(rpm.expand("%{ver}"), "-", "~"); print(ver)}
-Release:        5%{?dist}
+Release:        1%{?dist}
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
 URL:            http://www.mesa3d.org
 
@@ -99,16 +98,16 @@ Source2: https://github.com/mesonbuild/meson/releases/download/%{meson_ver}/meso
 
 # libclc is not available in RHEL but it is required for Intel drivers since
 # mesa >= 24.1.0
-%global libclc_version 21.1.3
-Source3: https://github.com/llvm/llvm-project/releases/download/llvmorg-%{libclc_version}/libclc-%{libclc_version}.src.tar.xz
+%global libclc_version 22.1.1
+Source3: https://github.com/llvm/llvm-project/releases/download/llvmorg-%{libclc_version}/llvm-project-%{libclc_version}.src.tar.xz
 BuildRequires:  libedit-devel
 BuildRequires:  clang-devel >= %{libclc_version}
 # Build our own version
 # BuildRequires:  spirv-llvm-translator-tools
 
 # spirv-llvm-translator is a dependency of libclc
-%global spirv_llvm_trans_ver 21.1.2
-%global spirv_llvm_trans_commit a37544fc0bb90b4e8b8d755580119c018891dfa4
+%global spirv_llvm_trans_ver 22.1.1
+%global spirv_llvm_trans_commit 114f5ee1cec66fe2ca733c12770c1bc196675d32
 %global spirv_llvm_trans_shortcommit %(c=%{spirv_llvm_trans_commit}; echo ${c:0:7})
 Source4: https://github.com/KhronosGroup/SPIRV-LLVM-Translator/archive/%{spirv_llvm_trans_commit}/spirv-llvm-translator-%{spirv_llvm_trans_shortcommit}.tar.gz
 BuildRequires:  cmake
@@ -128,10 +127,10 @@ BuildRequires:  wayland-devel
 # https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/subprojects
 # but we generally want the latest compatible versions
 %global rust_paste_ver 1.0.15
-%global rust_proc_macro2_ver 1.0.101
-%global rust_quote_ver 1.0.40
-%global rust_syn_ver 2.0.106
-%global rust_unicode_ident_ver 1.0.18
+%global rust_proc_macro2_ver 1.0.106
+%global rust_quote_ver 1.0.44
+%global rust_syn_ver 2.0.115
+%global rust_unicode_ident_ver 1.0.23
 %global rustc_hash_ver 2.1.1
 Source10:       https://crates.io/api/v1/crates/paste/%{rust_paste_ver}/download#/paste-%{rust_paste_ver}.tar.gz
 Source11:       https://crates.io/api/v1/crates/proc-macro2/%{rust_proc_macro2_ver}/download#/proc-macro2-%{rust_proc_macro2_ver}.tar.gz
@@ -140,25 +139,25 @@ Source13:       https://crates.io/api/v1/crates/syn/%{rust_syn_ver}/download#/sy
 Source14:       https://crates.io/api/v1/crates/unicode-ident/%{rust_unicode_ident_ver}/download#/unicode-ident-%{rust_unicode_ident_ver}.tar.gz
 Source15:       https://crates.io/api/v1/crates/rustc-hash/%{rustc_hash_ver}/download#/rustc-hash-%{rustc_hash_ver}.tar.gz
 
-# fix zink/device-select bug
-Patch11:        0001-device-select-add-a-layer-setting-to-disable-device-.patch
-Patch12:        0002-zink-use-device-select-layer-settings-to-disable-dev.patch
-
-# Fix s390x regressions:
-# https://issues.redhat.com/browse/RHEL-151315
-Patch13:        0001-gallivm-handle-u16-correct-on-const-loads.patch
-Patch14:        0001-Revert-dri-fix-__DRI_IMAGE_FORMAT-to-PIPE_FORMAT-map.patch
-
-# Fix performance issue with Xorg
-Patch21:	0001-drisw-Modify-drisw_swap_buffers_with_damage-to-swap-.patch
-Patch22:	0002-Revert-drisw-Copy-entire-buffer-ignoring-damage-regi.patch
-
-# Fix freeze with nouveau + zink + motif
-Patch30:	0001-zink-Return-zink_device-in-create_logical_device.patch
-Patch31:	0002-zink-Make-screen-queue_lock-a-pointer.patch
-Patch32:	0003-zink-Create-one-queue-lock-per-device.patch
-Patch33:	0004-zink-Lock-queue_lock-in-zink_destroy_screen.patch
-Patch34:	0005-zink-Lock-around-screen_debug_marker_-begin-end.patch
+Patch: 0001-Fix-build-with-python-3.9.patch
+Patch: 0002-Fix-enum.patch
+Patch: 0003-Revert-tu-autotune-Clear-active_batches-before-histo.patch
+Patch: 0004-Revert-tu-autotune-Allocate-performance-counters-fro.patch
+Patch: 0005-Revert-tu-autotune-Fail-gracefully-when-CP-counters-.patch
+Patch: 0006-Revert-tu-autotune-Only-lock-RPs-sustain-certain-mod.patch
+Patch: 0007-Revert-tu-autotune-Allow-99-max-probability-in-profi.patch
+Patch: 0008-Revert-tu-autotune-Add-render-mode-locking-to-PROFIL.patch
+Patch: 0009-Revert-tu-util-Allow-setting-autotune-mode-from-dric.patch
+Patch: 0010-Revert-tu-autotune-Add-prefer-SYSMEM-GMEM-mode.patch
+Patch: 0011-Revert-tu-Only-emit-preempt-optimization-ambles-when.patch
+Patch: 0012-Revert-tu-Disable-features-using-performance-counter.patch
+Patch: 0013-Revert-tu-autotune-Add-Preempt-Optimize-mode.patch
+Patch: 0014-Revert-tu-autotune-Disable-autotuning-for-small-rend.patch
+Patch: 0015-Revert-tu-autotune-Prefer-SYSMEM-when-only-SW-binnin.patch
+Patch: 0016-Revert-tu-autotune-Add-Profiled-algorithm.patch
+Patch: 0017-Revert-tu-autotune-Improve-RP-hash.patch
+Patch: 0018-Revert-tu-Rewrite-autotune-in-C.patch
+Patch: 0019-Fix-is_perf_cntr_selectable-in-tu_device.cc.patch
 
 BuildRequires:  meson
 BuildRequires:  gcc
@@ -207,9 +206,6 @@ BuildRequires:  flex
 %if 0%{?with_lmsensors}
 BuildRequires:  lm_sensors-devel
 %endif
-%if 0%{?with_vdpau}
-BuildRequires:  pkgconfig(vdpau) >= 1.1
-%endif
 %if 0%{?with_va}
 BuildRequires:  pkgconfig(libva) >= 0.38.0
 %endif
@@ -254,6 +250,7 @@ BuildRequires:  pkgconfig(vulkan)
 %if 0%{?with_d3d12}
 BuildRequires:  pkgconfig(DirectX-Headers) >= 1.614.1
 %endif
+BuildRequires:  libatomic
 
 %description
 %{summary}.
@@ -264,6 +261,7 @@ Provides:       mesa-dri-filesystem = %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-omx-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-libd3d < %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-libd3d-devel < %{?epoch:%{epoch}:}%{version}-%{release}
+Obsoletes:      mesa-vdpau-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description filesystem
 %{summary}.
@@ -334,15 +332,6 @@ Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{rel
 Obsoletes:      %{name}-vaapi-drivers < 22.2.0-5
 
 %description va-drivers
-%{summary}.
-%endif
-
-%if 0%{?with_vdpau}
-%package        vdpau-drivers
-Summary:        Mesa-based VDPAU drivers
-Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-
-%description vdpau-drivers
 %{summary}.
 %endif
 
@@ -455,9 +444,9 @@ path = "src/nouveau/nil/lib.rs"
 
 # only direct dependencies need to be listed here
 [dependencies]
-paste = "$(grep ^directory subprojects/paste.wrap | sed 's|.*-||')"
-syn = { version = "$(grep ^directory subprojects/syn.wrap | sed 's|.*-||')", features = ["clone-impls"] }
-rustc-hash = "$(grep ^directory subprojects/rustc-hash.wrap | sed 's|.*-||')"
+paste = "$(grep ^directory subprojects/paste*.wrap | sed 's|.*-||')"
+syn = { version = "$(grep ^directory subprojects/syn*.wrap | sed 's|.*-||')", features = ["clone-impls"] }
+rustc-hash = "$(grep ^directory subprojects/rustc-hash*.wrap | sed 's|.*-||')"
 _EOF
 %if 0%{?vendor_nvk_crates}
 %cargo_prep -v subprojects/packagecache
@@ -507,14 +496,19 @@ export PKG_CONFIG_PATH=%{buildroot}%{_libdir}/pkgconfig:%{buildroot}%{_datadir}/
 export PATH=%{buildroot}%{_bindir}:$PATH
 
 # Build libclc
-cd libclc-%{libclc_version}.src
+cd llvm-project-%{libclc_version}.src/libclc
 export CFLAGS="%{build_cflags} -D__extern_always_inline=inline"
+export CC=clang
 %cmake -GNinja \
        -DCMAKE_INSTALL_DATADIR:PATH=%{_lib} \
+       -DLLVM_DIR="/usr/lib64/cmake/llvm/" \
        -DLIBCLC_TARGETS_TO_BUILD="spirv-mesa3d-;spirv64-mesa3d-" \
+       -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations" \
        -DLLVM_SPIRV=%{buildroot}%{_bindir}/llvm-spirv
 %cmake_build
 %cmake_install
+unset CC
+unset CFLAGS
 cd -
 sed -e "s!libexecdir=!libexecdir=\/%{buildroot}!" -i %{buildroot}%{_libdir}/pkgconfig/libclc.pc
 
@@ -535,7 +529,7 @@ export RUSTFLAGS="%build_rustflags"
 export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
 %endif
 rewrite_wrap_file() {
-   sed -e "/source.*/d" -e "s/${1}-.*/$(basename ${MESON_PACKAGE_CACHE_DIR:-subprojects/packagecache}/${1}-*)/" -i subprojects/${1}.wrap
+  sed -e "/source.*/d" -e "s/^directory = ${1}-.*/directory = $(basename ${MESON_PACKAGE_CACHE_DIR:-subprojects/packagecache}/${1}-*)/" -i subprojects/${1}*.wrap
 }
 
 rewrite_wrap_file proc-macro2
@@ -553,7 +547,6 @@ rewrite_wrap_file rustc-hash
 %else
   -Dgallium-drivers=llvmpipe,virgl \
 %endif
-  -Dgallium-vdpau=%{?with_vdpau:enabled}%{!?with_vdpau:disabled} \
   -Dgallium-va=%{?with_va:enabled}%{!?with_va:disabled} \
   -Dgallium-mediafoundation=disabled \
   -Dteflon=%{?with_teflon:true}%{!?with_teflon:false} \
@@ -575,6 +568,7 @@ rewrite_wrap_file rustc-hash
   -Dshared-llvm=enabled \
   -Dvalgrind=%{?with_valgrind:enabled}%{!?with_valgrind:disabled} \
   -Dbuild-tests=false \
+  -Ddisplay-info=disabled \
 %if !0%{?with_libunwind}
   -Dlibunwind=disabled \
 %endif
@@ -629,14 +623,50 @@ rm -f  %{buildroot}%{_libdir}/pkgconfig/LLVMSPIRVLib.pc
 rm -f  %{buildroot}%{_datadir}/pkgconfig/wayland-protocols.pc
 rm -fr %{buildroot}%{_datadir}/wayland-protocols/
 
-# libvdpau opens the versioned name, don't bother including the unversioned
-rm -vf %{buildroot}%{_libdir}/vdpau/*.so
-
 # likewise glvnd
 rm -vf %{buildroot}%{_libdir}/libGLX_mesa.so
 rm -vf %{buildroot}%{_libdir}/libEGL_mesa.so
 # XXX can we just not build this
 rm -vf %{buildroot}%{_libdir}/libGLES*
+
+# Remove some unused kmsro driver on x86_64
+%ifarch x86_64 i686 ppc64le
+rm -f %{buildroot}%{_libdir}/dri/armada-drm_dri.so
+rm -f %{buildroot}%{_libdir}/dri/exynos_dri.so
+rm -f %{buildroot}%{_libdir}/dri/gm12u320_dri.so
+rm -f %{buildroot}%{_libdir}/dri/hdlcd_dri.so
+rm -f %{buildroot}%{_libdir}/dri/hx8357d_dri.so
+rm -f %{buildroot}%{_libdir}/dri/ili9163_dri.so
+rm -f %{buildroot}%{_libdir}/dri/ili9225_dri.so
+rm -f %{buildroot}%{_libdir}/dri/ili9341_dri.so
+rm -f %{buildroot}%{_libdir}/dri/ili9486_dri.so
+rm -f %{buildroot}%{_libdir}/dri/imx-dcss_dri.so
+rm -f %{buildroot}%{_libdir}/dri/mediatek_dri.so
+rm -f %{buildroot}%{_libdir}/dri/meson_dri.so
+rm -f %{buildroot}%{_libdir}/dri/mi0283qt_dri.so
+rm -f %{buildroot}%{_libdir}/dri/panel-mipi-dbi_dri.so
+rm -f %{buildroot}%{_libdir}/dri/pl111_dri.so
+rm -f %{buildroot}%{_libdir}/dri/repaper_dri.so
+rm -f %{buildroot}%{_libdir}/dri/rockchip_dri.so
+rm -f %{buildroot}%{_libdir}/dri/rzg2l-du_dri.so
+rm -f %{buildroot}%{_libdir}/dri/ssd130x_dri.so
+rm -f %{buildroot}%{_libdir}/dri/st7586_dri.so
+rm -f %{buildroot}%{_libdir}/dri/st7735r_dri.so
+rm -f %{buildroot}%{_libdir}/dri/sti_dri.so
+rm -f %{buildroot}%{_libdir}/dri/sun4i-drm_dri.so
+rm -f %{buildroot}%{_libdir}/dri/vkms_dri.so
+rm -f %{buildroot}%{_libdir}/dri/zynqmp-dpsub_dri.so
+rm -f %{buildroot}%{_libdir}/dri/ingenic-drm_dri.so
+rm -f %{buildroot}%{_libdir}/dri/imx-drm_dri.so
+rm -f %{buildroot}%{_libdir}/dri/imx-lcdif_dri.so
+rm -f %{buildroot}%{_libdir}/dri/kirin_dri.so
+rm -f %{buildroot}%{_libdir}/dri/komeda_dri.so
+rm -f %{buildroot}%{_libdir}/dri/mali-dp_dri.so
+rm -f %{buildroot}%{_libdir}/dri/mcde_dri.so
+rm -f %{buildroot}%{_libdir}/dri/mxsfb-drm_dri.so
+rm -f %{buildroot}%{_libdir}/dri/rcar-du_dri.so
+rm -f %{buildroot}%{_libdir}/dri/stm_dri.so
+%endif
 
 %if ! 0%{?with_asahi}
 # This symlink is unconditionally created when any kmsro driver is enabled
@@ -726,14 +756,8 @@ popd
 %{_libdir}/dri/i915_dri.so
 %endif
 %endif
-%ifarch %{arm} aarch64
-%if 0%{?with_asahi}
-%{_libdir}/dri/apple_dri.so
-%{_libdir}/dri/asahi_dri.so
-%endif
-%if 0%{?with_d3d12}
-%{_libdir}/dri/d3d12_dri.so
-%endif
+
+%ifarch aarch64
 %{_libdir}/dri/ingenic-drm_dri.so
 %{_libdir}/dri/imx-drm_dri.so
 %{_libdir}/dri/imx-lcdif_dri.so
@@ -745,6 +769,16 @@ popd
 %{_libdir}/dri/rcar-du_dri.so
 %{_libdir}/dri/stm_dri.so
 %endif
+%ifarch %{arm} aarch64
+%if 0%{?with_asahi}
+%{_libdir}/dri/apple_dri.so
+%{_libdir}/dri/asahi_dri.so
+%endif
+%if 0%{?with_d3d12}
+%{_libdir}/dri/d3d12_dri.so
+%endif
+%endif
+
 %if 0%{?with_vc4}
 %{_libdir}/dri/vc4_dri.so
 %endif
@@ -801,6 +835,10 @@ popd
 %{_libdir}/dri/vkms_dri.so
 %{_libdir}/dri/zynqmp-dpsub_dri.so
 %endif
+%ifarch x86_64 i686 ppc64le
+%{_libdir}/dri/udl_dri.so
+%endif
+
 %if 0%{?with_vulkan_hw}
 %{_libdir}/dri/zink_dri.so
 %endif
@@ -818,22 +856,6 @@ popd
 %{_libdir}/dri/d3d12_drv_video.so
 %endif
 %{_libdir}/dri/virtio_gpu_drv_video.so
-%endif
-
-%if 0%{?with_vdpau}
-%files vdpau-drivers
-%dir %{_libdir}/vdpau
-%{_libdir}/vdpau/libvdpau_nouveau.so.1*
-%if 0%{?with_r600}
-%{_libdir}/vdpau/libvdpau_r600.so.1*
-%endif
-%if 0%{?with_radeonsi}
-%{_libdir}/vdpau/libvdpau_radeonsi.so.1*
-%endif
-%if 0%{?with_d3d12}
-%{_libdir}/vdpau/libvdpau_d3d12.so.1*
-%endif
-%{_libdir}/vdpau/libvdpau_virtio_gpu.so.1*
 %endif
 
 %if 0%{?with_d3d12}
@@ -876,26 +898,27 @@ popd
 %{_libdir}/libvulkan_intel_hasvk.so
 %{_datadir}/vulkan/icd.d/intel_hasvk_icd.*.json
 %endif
-%ifarch %{arm} aarch64
+%ifarch aarch64 x86_64 %{ix86}
 %if 0%{?with_asahi}
 %{_libdir}/libvulkan_asahi.so
 %{_datadir}/vulkan/icd.d/asahi_icd.*.json
 %endif
+%ifarch aarch64
 %{_libdir}/libvulkan_broadcom.so
 %{_datadir}/vulkan/icd.d/broadcom_icd.*.json
 %{_libdir}/libvulkan_freedreno.so
 %{_datadir}/vulkan/icd.d/freedreno_icd.*.json
 %{_libdir}/libvulkan_panfrost.so
 %{_datadir}/vulkan/icd.d/panfrost_icd.*.json
-%{_libdir}/libpowervr_rogue.so
 %{_libdir}/libvulkan_powervr_mesa.so
 %{_datadir}/vulkan/icd.d/powervr_mesa_icd.*.json
 %endif
 %endif
+%endif
 
 %changelog
-* Mon Jul 6 2026 Jocelyn Falempe <jfalempe@redhat.com> - 25.2.7-5
-- Resolves: https://redhat.atlassian.net/browse/RHEL-181885
+* Tue Jun 16 2026 Jocelyn Falempe <jfalempe@redhat.com> - 26.1.1-1
+  Resolves: https://redhat.atlassian.net/browse/RHEL-135263
 
 * Mon Feb 23 2026 José Expósito <jexposit@redhat.com> - 25.2.7-4
 - Fix s390x regressions

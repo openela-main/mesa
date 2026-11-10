@@ -1,0 +1,255 @@
+From 8aee5837d69f15322a5d9ca9a9df4e2dd77554a5 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 19 Jun 2026 13:44:02 +0200
+Subject: [PATCH 01/19] Fix build with python 3.9
+
+Signed-off-by: Jocelyn Falempe <jfalempe@redhat.com>
+---
+ meson.build                           |   2 +-
+ src/intel/compiler/jay/jay_opcodes.py |   2 +-
+ src/vulkan/util/vk_cmd_queue_gen.py   | 195 +++++++++++++-------------
+ 3 files changed, 99 insertions(+), 100 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 392f147f365..b6aec7f8d93 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1037,7 +1037,7 @@ endif
+ # Find a python executable that meets our version requirement.
+ # - On Windows, a venv has no versioned aliased to 'python'.
+ # - On RHEL 9, python3 is 3.9, so we must use python3.12.
+-python_version_req = '>= 3.10'
++python_version_req = '>= 3.9'
+ python_exec_list = ['python3.16', 'python3.15', 'python3.14', 'python3.13',
+                     'python3.12', 'python3.11', 'python3.10', 'python3', 'python']
+ 
+diff --git a/src/intel/compiler/jay/jay_opcodes.py b/src/intel/compiler/jay/jay_opcodes.py
+index 029b087ed7c..4951e875ac7 100644
+--- a/src/intel/compiler/jay/jay_opcodes.py
++++ b/src/intel/compiler/jay/jay_opcodes.py
+@@ -1,6 +1,6 @@
+ # Copyright 2026 Intel Corporation
+ # SPDX-License-Identifier: MIT
+-
++from __future__ import annotations
+ from typing import TYPE_CHECKING
+ from dataclasses import dataclass
+ import enum
+diff --git a/src/vulkan/util/vk_cmd_queue_gen.py b/src/vulkan/util/vk_cmd_queue_gen.py
+index 4c74158f11e..2468d9bc098 100644
+--- a/src/vulkan/util/vk_cmd_queue_gen.py
++++ b/src/vulkan/util/vk_cmd_queue_gen.py
+@@ -644,113 +644,112 @@ def get_param_copy(builder, command, types, src_parent_access, dst_parent_access
+     src = src_parent_access + param.name
+     dst = dst_parent_access + (to_field_name(param.name) if dst_snake_case else param.name)
+ 
+-    match categorize_param(command, types, None, param):
+-        case ParamCategory.ASSIGNABLE:
+-            builder.add("%s = %s;" % (dst, src))
+-        case ParamCategory.FLAT_ARRAY:
+-            builder.add("memcpy(%s, %s, sizeof(*%s) * %s);" % (dst, src, src, get_array_len(param)))
+-        case ParamCategory.UNSIZED_RAW_POINTER:
+-            builder.add("%s = (%s)%s;" % (dst, remove_suffix(param.decl.replace("const", ""), param.name), src))
+-        case ParamCategory.STRING:
+-            builder.add("%s = linear_strdup(queue->ctx, %s);" % (dst, src))
+-        case ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE_DATA:
+-            builder.add("%s = enqueue_push_descriptor_template_data(queue, %sdescriptorUpdateTemplate, %s);" % (dst, src_parent_access, src))
+-        case ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE:
+-                builder.add("%s = %s;" % (dst, src))
+-                builder.add("enqueue_descriptor_template(queue, %s);" % (src))
+-        case ParamCategory.PIPELINE_LAYOUT:
+-                builder.add("%s = %s;" % (dst, src))
+-                builder.add("enqueue_pipeline_layout(queue, %s);" % (src))
+-        case ParamCategory.STRUCT:
+-
+-            if nullable:
+-                builder.add("if (%s) {" % (src))
+-                builder.level += 1
+-
+-            if param.type == "void":
+-                size = 1
+-            else:
+-                size = "sizeof(%s)" % param.type
+-
+-            is_ndarray = param.len and "," in param.len
+-            if param.len and param.len != "struct-ptr" and not is_ndarray:
+-                size = "%s * ceil(%s%s)" % (size, src_parent_access, param.len)
+-
+-            builder.add("%s = linear_alloc_child(queue->ctx, %s);" % (dst, size))
+-            builder.add("if (%s == NULL) return NULL;" % (dst))
+-            builder.add("memcpy((void *)%s, %s, %s);" % (dst, src, size))
+-            if param.type == 'VkDescriptorSetLayout':
+-                array_index = builder.get_variable_name("i")
+-                builder.add("for (unsigned %s = 0; %s < %s%s; %s++) {" % (array_index, array_index, src_parent_access, param.len, array_index))
+-                builder.level += 1
+-                builder.add("enqueue_descriptor_layout(queue, %s[%s]);" % (src, array_index))
+-                builder.level -= 1
+-                builder.add("}")
+-
+-            if param.type in types:
+-                has_explicit_copy = param.type in EXPLICIT_PARAM_COPIES
+-                needs_member_copy = has_explicit_copy
+-                for member in types[param.type].members:
+-                    match categorize_param(command, types, param.type, member):
+-                        case ParamCategory.PNEXT | ParamCategory.STRUCT | ParamCategory.STRING:
+-                            needs_member_copy = True
+-                        case ParamCategory.PIPELINE_LAYOUT:
+-                            builder.add("enqueue_pipeline_layout(queue, %s->%s);" % (src, member.name))
+-                        case ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE:
+-                            builder.add("enqueue_descriptor_template(queue, %s->%s);" % (src, member.name))
+-
+-                if needs_member_copy:
++    cat_param = categorize_param(command, types, None, param)
++    if cat_param == ParamCategory.ASSIGNABLE:
++        builder.add("%s = %s;" % (dst, src))
++    elif cat_param == ParamCategory.FLAT_ARRAY:
++        builder.add("memcpy(%s, %s, sizeof(*%s) * %s);" % (dst, src, src, get_array_len(param)))
++    elif cat_param == ParamCategory.UNSIZED_RAW_POINTER:
++        builder.add("%s = (%s)%s;" % (dst, remove_suffix(param.decl.replace("const", ""), param.name), src))
++    elif cat_param == ParamCategory.STRING:
++        builder.add("%s = linear_strdup(queue->ctx, %s);" % (dst, src))
++    elif cat_param == ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE_DATA:
++        builder.add("%s = enqueue_push_descriptor_template_data(queue, %sdescriptorUpdateTemplate, %s);" % (dst, src_parent_access, src))
++    elif cat_param == ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE:
++        builder.add("%s = %s;" % (dst, src))
++        builder.add("enqueue_descriptor_template(queue, %s);" % (src))
++    elif cat_param == ParamCategory.PIPELINE_LAYOUT:
++        builder.add("%s = %s;" % (dst, src))
++        builder.add("enqueue_pipeline_layout(queue, %s);" % (src))
++    elif cat_param == ParamCategory.STRUCT:
++        if nullable:
++            builder.add("if (%s) {" % (src))
++            builder.level += 1
++
++        if param.type == "void":
++            size = 1
++        else:
++            size = "sizeof(%s)" % param.type
++
++        is_ndarray = param.len and "," in param.len
++        if param.len and param.len != "struct-ptr" and not is_ndarray:
++            size = "%s * ceil(%s%s)" % (size, src_parent_access, param.len)
++
++        builder.add("%s = linear_alloc_child(queue->ctx, %s);" % (dst, size))
++        builder.add("if (%s == NULL) return NULL;" % (dst))
++        builder.add("memcpy((void *)%s, %s, %s);" % (dst, src, size))
++        if param.type == 'VkDescriptorSetLayout':
++            array_index = builder.get_variable_name("i")
++            builder.add("for (unsigned %s = 0; %s < %s%s; %s++) {" % (array_index, array_index, src_parent_access, param.len, array_index))
++            builder.level += 1
++            builder.add("enqueue_descriptor_layout(queue, %s[%s]);" % (src, array_index))
++            builder.level -= 1
++            builder.add("}")
++
++        if param.type in types:
++            has_explicit_copy = param.type in EXPLICIT_PARAM_COPIES
++            needs_member_copy = has_explicit_copy
++            for member in types[param.type].members:
++                cat_param_type = categorize_param(command, types, param.type, member)
++                if cat_param_type == ParamCategory.PNEXT or cat_param_type == ParamCategory.STRUCT or cat_param_type == ParamCategory.STRING:
++                    needs_member_copy = True
++                elif cat_param_type == ParamCategory.PIPELINE_LAYOUT:
++                    builder.add("enqueue_pipeline_layout(queue, %s->%s);" % (src, member.name))
++                elif cat_param_type == ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE:
++                    builder.add("enqueue_descriptor_template(queue, %s->%s);" % (src, member.name))
++
++            if needs_member_copy:
++                tmp_dst_name = builder.get_variable_name("tmp_dst")
++                tmp_src_name = builder.get_variable_name("tmp_src")
++
++                builder.add("%s *%s = (void *)%s;" % (param.type, tmp_dst_name, dst))
++                builder.add("%s *%s = (void *)%s;" % (param.type, tmp_src_name, src))
++
++                struct_array_copy = param.len and param.len != "struct-ptr" and param.type != "void"
++                if struct_array_copy:
++                    array_index = builder.get_variable_name("i")
++                    builder.add("for (uint32_t %s = 0; %s < %s%s; %s++) {" % (array_index, array_index, src_parent_access, param.len, array_index))
++                    builder.level += 1
++                    prev_tmp_dst_name = tmp_dst_name
++                    prev_tmp_src_name = tmp_src_name
+                     tmp_dst_name = builder.get_variable_name("tmp_dst")
+                     tmp_src_name = builder.get_variable_name("tmp_src")
++                    builder.add("%s *%s = %s + %s;" % (param.type, tmp_dst_name, prev_tmp_dst_name, array_index))
++                    builder.add("%s *%s = %s + %s;" % (param.type, tmp_src_name, prev_tmp_src_name, array_index))
+ 
+-                    builder.add("%s *%s = (void *)%s;" % (param.type, tmp_dst_name, dst))
+-                    builder.add("%s *%s = (void *)%s;" % (param.type, tmp_src_name, src))
+-
+-                    struct_array_copy = param.len and param.len != "struct-ptr" and param.type != "void"
+-                    if struct_array_copy:
+-                        array_index = builder.get_variable_name("i")
+-                        builder.add("for (uint32_t %s = 0; %s < %s%s; %s++) {" % (array_index, array_index, src_parent_access, param.len, array_index))
+-                        builder.level += 1
+-                        prev_tmp_dst_name = tmp_dst_name
+-                        prev_tmp_src_name = tmp_src_name
+-                        tmp_dst_name = builder.get_variable_name("tmp_dst")
+-                        tmp_src_name = builder.get_variable_name("tmp_src")
+-                        builder.add("%s *%s = %s + %s;" % (param.type, tmp_dst_name, prev_tmp_dst_name, array_index))
+-                        builder.add("%s *%s = %s + %s;" % (param.type, tmp_src_name, prev_tmp_src_name, array_index))
+-
++                for member in types[param.type].members:
++                    category = categorize_param(command, types, param.type, member)
++                    if category == ParamCategory.PNEXT:
++                        get_pnext_copy(builder, command, types, param.type, "%s->pNext" % (tmp_src_name), "%s->pNext" % (tmp_dst_name))
++                    elif category == ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE_DATA:
++                        get_param_copy(builder, command, types, "%s->" % (tmp_src_name), "%s->" % (tmp_dst_name), member, dst_initialized=True)
++
++                if has_explicit_copy:
++                    builder.add("enqueue_%s(queue, %s, %s);" % (param.type, tmp_dst_name, tmp_src_name))
++                else:
+                     for member in types[param.type].members:
+                         category = categorize_param(command, types, param.type, member)
+-                        if category == ParamCategory.PNEXT:
+-                            get_pnext_copy(builder, command, types, param.type, "%s->pNext" % (tmp_src_name), "%s->pNext" % (tmp_dst_name))
+-                        elif category == ParamCategory.DESCRIPTOR_UPDATE_TEMPLATE_DATA:
++                        if category == ParamCategory.STRUCT or category == ParamCategory.STRING:
+                             get_param_copy(builder, command, types, "%s->" % (tmp_src_name), "%s->" % (tmp_dst_name), member, dst_initialized=True)
+ 
+-                    if has_explicit_copy:
+-                        builder.add("enqueue_%s(queue, %s, %s);" % (param.type, tmp_dst_name, tmp_src_name))
+-                    else:
+-                        for member in types[param.type].members:
+-                            category = categorize_param(command, types, param.type, member)
+-                            if category == ParamCategory.STRUCT or category == ParamCategory.STRING:
+-                                get_param_copy(builder, command, types, "%s->" % (tmp_src_name), "%s->" % (tmp_dst_name), member, dst_initialized=True)
+-
+-                    if struct_array_copy:
+-                        builder.level -= 1
+-                        builder.add("}")
+-
+-            if nullable:
+-                builder.level -= 1
+-                if dst_initialized:
+-                    builder.add("}")
+-                else:
+-                    builder.add("} else {")
+-                    builder.level += 1
+-                    builder.add("%s = NULL;" % (dst))
++                if struct_array_copy:
+                     builder.level -= 1
+                     builder.add("}")
+-        case ParamCategory.NULL:
+-            assert False
+-        case ParamCategory.PNEXT:
+-            assert False
++
++        if nullable:
++            builder.level -= 1
++            if dst_initialized:
++                builder.add("}")
++            else:
++                builder.add("} else {")
++                builder.level += 1
++                builder.add("%s = NULL;" % (dst))
++                builder.level -= 1
++                builder.add("}")
++    elif cat_param == ParamCategory.NULL:
++        assert False
++    elif cat_param == ParamCategory.PNEXT:
++        assert False
+ 
+ def get_params_copy(command, types):
+     builder = CodeBuilder(1)
+-- 
+2.54.0
+

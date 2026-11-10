@@ -1,0 +1,36 @@
+From af7ed267f67b024829c391f9016d0fb7ca18cecc Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Wed, 24 Jun 2026 11:42:19 +0200
+Subject: [PATCH 02/19] Fix enum
+
+Signed-off-by: Jocelyn Falempe <jfalempe@redhat.com>
+---
+ src/intel/compiler/jay/jay_ir.h | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/intel/compiler/jay/jay_ir.h b/src/intel/compiler/jay/jay_ir.h
+index 8307044ef8a..afd923062ca 100644
+--- a/src/intel/compiler/jay/jay_ir.h
++++ b/src/intel/compiler/jay/jay_ir.h
+@@ -579,7 +579,8 @@ jay_type_is_any_float(enum jay_type t)
+    return jay_base_type(t) == JAY_TYPE_F || jay_base_type(t) == JAY_TYPE_BF;
+ }
+ 
+-enum jay_predication : uint8_t {
++typedef uint8_t jay_predication;
++enum {
+    /** No predication. */
+    JAY_NOT_PREDICATED = 0,
+ 
+@@ -634,7 +635,7 @@ typedef struct jay_inst {
+    bool decrement_dep:1;
+    unsigned padding  :12;
+ 
+-   enum jay_predication predication;
++   jay_predication predication;
+    enum jay_conditional_mod conditional_mod;
+ 
+    jay_def cond_flag; /**< conditional flag */
+-- 
+2.54.0
+

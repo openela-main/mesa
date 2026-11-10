@@ -1,0 +1,100 @@
+From c70d031b220ca3ed83867bb1cd7e2e179109d13f Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 11:03:25 +0200
+Subject: [PATCH 15/19] Revert "tu/autotune: Prefer SYSMEM when only SW binning
+ is possible"
+
+This reverts commit 8e1fe9da20ceb13c125509fe5665108a57d642cf.
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 14 +++-----------
+ src/freedreno/vulkan/tu_device.h      |  7 ++-----
+ src/freedreno/vulkan/tu_util.cc       | 14 +++++++++-----
+ 3 files changed, 14 insertions(+), 21 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 3e04110b4e6..3fe6be1976d 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -1313,7 +1313,7 @@ use_hw_binning(struct tu_cmd_buffer *cmd)
+       return true;
+    }
+ 
+-   return vsc->binning_possible && vsc->binning_useful;
++   return vsc->binning;
+ }
+ 
+ static bool
+@@ -1376,16 +1376,8 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
+       return true;
+    }
+ 
+-   if (TU_DEBUG(GMEM)) {
+-      cmd->state.rp.gmem_disable_reason = "TU_DEBUG(GMEM)";
++   if (TU_DEBUG(GMEM))
+       return false;
+-   }
+-
+-   /* This is a case where it's better to avoid GMEM, too many tiles but no HW binning possible. */
+-   if (!vsc->binning_possible && vsc->binning_useful) {
+-      cmd->state.rp.gmem_disable_reason = "Too many tiles and HW binning is not possible";
+-      return true;
+-   }
+ 
+    bool use_sysmem = cmd->device->autotune->get_optimal_mode(cmd, rp_ctx) == tu_autotune::render_mode::SYSMEM;
+    if (use_sysmem)
+@@ -6431,7 +6423,7 @@ tu_emit_subpass_begin_gmem(struct tu_cmd_buffer *cmd, struct tu_resolve_group *r
+     * (perf queries), then we can't do this optimization since the
+     * start-of-the-CS geometry condition will have been overwritten.
+     */
+-   bool cond_load_allowed = vsc->binning_possible &&
++   bool cond_load_allowed = vsc->binning &&
+                             cmd->state.pass->has_cond_load_store &&
+                             !cmd->state.rp.draw_cs_writes_to_cond_pred;
+ 
+diff --git a/src/freedreno/vulkan/tu_device.h b/src/freedreno/vulkan/tu_device.h
+index 1be07dcdc43..9665135e0e6 100644
+--- a/src/freedreno/vulkan/tu_device.h
++++ b/src/freedreno/vulkan/tu_device.h
+@@ -561,11 +561,8 @@ struct tu_vsc_config {
+    /* Whether binning could be used for gmem rendering using this framebuffer. */
+    bool binning_possible;
+ 
+-   /* Whether binning is useful for GMEM rendering performance using this framebuffer. This is independent of whether
+-    * binning is possible, and is determined by the tile count. Not binning when it's useful would be a performance
+-    * hazard, and GMEM rendering should be avoided in the case where it's useful to bin but not possible to do so.
+-    */
+-   bool binning_useful;
++   /* Whether binning should be used for gmem rendering using this framebuffer. */
++   bool binning;
+ 
+    /* pipe register values */
+    uint32_t pipe_config[MAX_VSC_PIPES];
+diff --git a/src/freedreno/vulkan/tu_util.cc b/src/freedreno/vulkan/tu_util.cc
+index 68f2d67dda6..77b8ac4ddbb 100644
+--- a/src/freedreno/vulkan/tu_util.cc
++++ b/src/freedreno/vulkan/tu_util.cc
+@@ -460,12 +460,16 @@ tu_tiling_config_update_pipes(struct tu_vsc_config *vsc,
+ static void
+ tu_tiling_config_update_binning(struct tu_vsc_config *vsc, const struct tu_device *device)
+ {
+-   vsc->binning_useful = (vsc->tile_count.width * vsc->tile_count.height) > 2;
++   if (vsc->binning_possible) {
++      vsc->binning = (vsc->tile_count.width * vsc->tile_count.height) > 2;
+ 
+-   if (TU_DEBUG(FORCEBIN))
+-      vsc->binning_useful = true;
+-   if (TU_DEBUG(NOBIN))
+-      vsc->binning_useful = false;
++      if (TU_DEBUG(FORCEBIN))
++         vsc->binning = true;
++      if (TU_DEBUG(NOBIN))
++         vsc->binning = false;
++   } else {
++      vsc->binning = false;
++   }
+ }
+ 
+ void
+-- 
+2.54.0
+

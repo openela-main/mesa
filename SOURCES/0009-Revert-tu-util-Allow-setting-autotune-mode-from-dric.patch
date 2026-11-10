@@ -1,0 +1,119 @@
+From 4f7224ba2f0991d5773d83dd4a55ac2e6368d383 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 10:55:18 +0200
+Subject: [PATCH 09/19] Revert "tu+util: Allow setting autotune mode from
+ driconf"
+
+This reverts commit ed643d1766dbc16ce9a7457a4f93e1af1b5b3a07.
+---
+ docs/drivers/freedreno.rst          |  2 --
+ src/freedreno/vulkan/tu_autotune.cc | 15 +++++----------
+ src/freedreno/vulkan/tu_device.cc   |  3 ---
+ src/freedreno/vulkan/tu_device.h    |  3 ---
+ src/util/driconf.h                  |  4 ----
+ 5 files changed, 5 insertions(+), 22 deletions(-)
+
+diff --git a/docs/drivers/freedreno.rst b/docs/drivers/freedreno.rst
+index 60ab3e98c11..90afea283a4 100644
+--- a/docs/drivers/freedreno.rst
++++ b/docs/drivers/freedreno.rst
+@@ -707,8 +707,6 @@ environment variables:
+     in some high-confidence cases as well as letting ``TU_AUTOTUNE_FLAGS`` still
+     be applied.
+ 
+-  The algorithm can be set via the driconf option ``tu_autotune_algorithm`` as well.
+-
+ .. envvar:: TU_AUTOTUNE_FLAGS
+ 
+   Modifies the behavior of the selected algorithm. Supported flags are:
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 202e68c3a1a..b57c393e06e 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -273,16 +273,11 @@ tu_autotune::get_env_config()
+    static std::once_flag once;
+    static config_t at_config;
+    std::call_once(once, [&] {
++      const char *algo_env_str = os_get_option("TU_AUTOTUNE_ALGO");
+       algorithm algo = algorithm::DEFAULT;
+-      const char *algo_str = os_get_option("TU_AUTOTUNE_ALGO");
+-      std::string_view algo_strv;
+ 
+-      if (algo_str)
+-         algo_strv = algo_str;
+-      else if (device->instance->autotune_algo)
+-         algo_strv = device->instance->autotune_algo;
+-
+-      if (!algo_strv.empty()) {
++      if (algo_env_str) {
++         std::string_view algo_strv(algo_env_str);
+          if (algo_strv == "bandwidth") {
+             algo = algorithm::BANDWIDTH;
+          } else if (algo_strv == "profiled") {
+@@ -294,11 +289,11 @@ tu_autotune::get_env_config()
+          } else if (algo_strv == "prefer_gmem") {
+             algo = algorithm::PREFER_GMEM;
+          } else {
+-            mesa_logw("Unknown TU_AUTOTUNE_ALGO '%s', using default", algo_strv.data());
++            mesa_logw("Unknown TU_AUTOTUNE_ALGO '%s', using default", algo_env_str);
+          }
+ 
+          if (TU_DEBUG(STARTUP))
+-            mesa_logi("TU_AUTOTUNE_ALGO=%u (%s)", (uint8_t) algo, algo_strv.data());
++            mesa_logi("TU_AUTOTUNE_ALGO=%u (%s)", (uint8_t) algo, algo_env_str);
+       }
+ 
+       /* Parse the flags from the environment variable. */
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index a41b93c4948..25e11d45f8f 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -1840,7 +1840,6 @@ static const driOptionDescription tu_dri_options[] = {
+       DRI_CONF_TU_IGNORE_FRAG_DEPTH_DIRECTION(false)
+       DRI_CONF_TU_ENABLE_SOFTFLOAT32(false)
+       DRI_CONF_TU_EMULATE_ALPHA_TO_COVERAGE(false)
+-      DRI_CONF_TU_AUTOTUNE_ALGORITHM()
+    DRI_CONF_SECTION_END
+ };
+ 
+@@ -1873,8 +1872,6 @@ tu_init_dri_options(struct tu_instance *instance)
+          driQueryOptionb(&instance->dri_options, "tu_enable_softfloat32");
+    instance->emulate_alpha_to_coverage =
+          driQueryOptionb(&instance->dri_options, "tu_emulate_alpha_to_coverage");
+-   instance->autotune_algo =
+-         driQueryOptionstr(&instance->dri_options, "tu_autotune_algorithm");
+ }
+ 
+ static uint32_t instance_count = 0;
+diff --git a/src/freedreno/vulkan/tu_device.h b/src/freedreno/vulkan/tu_device.h
+index c9f521fcc15..b0ecf2f62ba 100644
+--- a/src/freedreno/vulkan/tu_device.h
++++ b/src/freedreno/vulkan/tu_device.h
+@@ -237,9 +237,6 @@ struct tu_instance
+     * instead.
+     */
+    bool emulate_alpha_to_coverage;
+-
+-   /* Configuration option to use a specific autotune algorithm by default. */
+-   const char *autotune_algo;
+ };
+ VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
+                        VK_OBJECT_TYPE_INSTANCE)
+diff --git a/src/util/driconf.h b/src/util/driconf.h
+index 5a73c15ac2f..a0b5e40af0b 100644
+--- a/src/util/driconf.h
++++ b/src/util/driconf.h
+@@ -692,10 +692,6 @@
+    DRI_CONF_OPT_B(tu_emulate_alpha_to_coverage, def, \
+                   "Enable emulation of alpha-to-coverage")
+ 
+-#define DRI_CONF_TU_AUTOTUNE_ALGORITHM() \
+-   DRI_CONF_OPT_S_NODEF(tu_autotune_algorithm, \
+-                        "Set the preferred autotune algorithm")
+-
+ /**
+  * \brief Honeykrisp specific configuration options
+  */
+-- 
+2.54.0
+

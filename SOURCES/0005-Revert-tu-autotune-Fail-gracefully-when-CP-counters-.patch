@@ -1,0 +1,149 @@
+From e9862fcd366d761f131865b390bde72157983a24 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 10:53:34 +0200
+Subject: [PATCH 05/19] Revert "tu/autotune: Fail gracefully when CP counters
+ are unavailable"
+
+This reverts commit 920a84802792cea85d752518a20881f1f6be110d.
+---
+ .pick_status.json                   |  2 +-
+ src/freedreno/vulkan/tu_autotune.cc | 90 ++++++++++++++---------------
+ src/freedreno/vulkan/tu_autotune.h  |  1 +
+ 3 files changed, 45 insertions(+), 48 deletions(-)
+
+diff --git a/.pick_status.json b/.pick_status.json
+index e04710b3344..c54f039590a 100644
+--- a/.pick_status.json
++++ b/.pick_status.json
+@@ -13984,7 +13984,7 @@
+         "description": "tu/autotune: Fail gracefully when CP counters are unavailable",
+         "nominated": true,
+         "nomination_type": 1,
+-        "resolution": 1,
++        "resolution": 0,
+         "main_sha": null,
+         "because_sha": null,
+         "notes": null
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 2dd5017b11b..e1e4666768c 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -1632,60 +1632,56 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
+ {
+    tu_bo_suballocator_init(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
+ 
+-   if (supports_preempt_latency_tracking()) {
+-      uint32_t group_count;
+-      const struct fd_perfcntr_group *groups = fd_perfcntrs(&device->physical_device->dev_id, &group_count);
+-      const char *fail_reason = nullptr;
+-
+-      const fd_perfcntr_group *cp_group = nullptr;
+-      for (uint32_t i = 0; i < group_count; i++) {
+-         if (strcmp(groups[i].name, "CP") == 0) {
+-            cp_group = &groups[i];
+-            break;
+-         }
+-      }
++   uint32_t group_count;
++   const struct fd_perfcntr_group *groups = fd_perfcntrs(&device->physical_device->dev_id, &group_count);
+ 
+-      if (cp_group) {
+-         auto get_perfcntr_countable = [](const struct fd_perfcntr_group *group,
+-                                          const char *name) -> const struct fd_perfcntr_countable * {
+-            for (uint32_t i = 0; i < group->num_countables; i++) {
+-               if (strcmp(group->countables[i].name, name) == 0)
+-                  return &group->countables[i];
+-            }
++   for (uint32_t i = 0; i < group_count; i++) {
++      if (strcmp(groups[i].name, "CP") == 0) {
++         cp_group = &groups[i];
++         break;
++      }
++   }
+ 
+-            return nullptr;
+-         };
++   if (!cp_group) {
++      mesa_loge("autotune: CP group not found");
++      result = VK_ERROR_INITIALIZATION_FAILED;
++      return;
++   } else if (cp_group->num_countables < 5) {
++      mesa_loge("autotune: CP group has too few countables");
++      result = VK_ERROR_INITIALIZATION_FAILED;
++      return;
++   }
+ 
+-         auto preemption_latency_countable = get_perfcntr_countable(cp_group, "PERF_CP_PREEMPTION_REACTION_DELAY");
+-         auto always_count_countable = get_perfcntr_countable(cp_group, "PERF_CP_ALWAYS_COUNT");
+-         if (preemption_latency_countable && always_count_countable) {
+-            if (cp_group->num_counters >= 2) {
+-               uint32_t preemption_latency_counter_index = cp_group->num_counters - 2;
+-               preemption_latency_selector_reg = cp_group->counters[preemption_latency_counter_index].select_reg;
+-               preemption_latency_selector = preemption_latency_countable->selector;
+-               preemption_latency_counter_reg_lo = cp_group->counters[preemption_latency_counter_index].counter_reg_lo;
+-
+-               uint32_t always_count_counter_index = cp_group->num_counters - 1;
+-               always_count_selector_reg = cp_group->counters[always_count_counter_index].select_reg;
+-               always_count_selector = always_count_countable->selector;
+-               always_count_counter_reg_lo = cp_group->counters[always_count_counter_index].counter_reg_lo;
+-            } else {
+-               fail_reason = "not enough counters in CP group for preemption latency tracking";
+-            }
+-         } else {
+-            fail_reason = "required countables not found in CP group";
+-         }
+-      } else {
+-         fail_reason = "CP counter group not found";
++   auto get_perfcntr_countable = [](const struct fd_perfcntr_group *group,
++                                    const char *name) -> const struct fd_perfcntr_countable * {
++      for (uint32_t i = 0; i < group->num_countables; i++) {
++         if (strcmp(group->countables[i].name, name) == 0)
++            return &group->countables[i];
+       }
+ 
+-      if (fail_reason) {
+-         if (TU_DEBUG(STARTUP) || active_config.load().test(mod_flag::PREEMPT_OPTIMIZE))
+-            mesa_logw("autotune: %s, preemption optimization not supported", fail_reason);
++      mesa_loge("autotune: %s not found in group %s", name, group->name);
++      return nullptr;
++   };
+ 
+-         supported_mod_flags &= ~((uint32_t) mod_flag::PREEMPT_OPTIMIZE);
+-         disable_preempt_optimize();
++   if (supports_preempt_latency_tracking()) {
++      auto preemption_latency_countable = get_perfcntr_countable(cp_group, "PERF_CP_PREEMPTION_REACTION_DELAY");
++      auto always_count_countable = get_perfcntr_countable(cp_group, "PERF_CP_ALWAYS_COUNT");
++
++      if (cp_group->num_counters < 2) {
++         mesa_loge("autotune: CP group has too few counters for preemption latency tracking");
++         result = VK_ERROR_INITIALIZATION_FAILED;
++         return;
+       }
++
++      uint32_t preemption_latency_counter_index = cp_group->num_counters - 2;
++      preemption_latency_selector_reg = cp_group->counters[preemption_latency_counter_index].select_reg;
++      preemption_latency_selector = preemption_latency_countable->selector;
++      preemption_latency_counter_reg_lo = cp_group->counters[preemption_latency_counter_index].counter_reg_lo;
++
++      uint32_t always_count_counter_index = cp_group->num_counters - 1;
++      always_count_selector_reg = cp_group->counters[always_count_counter_index].select_reg;
++      always_count_selector = always_count_countable->selector;
++      always_count_counter_reg_lo = cp_group->counters[always_count_counter_index].counter_reg_lo;
+    }
+ 
+    result = VK_SUCCESS;
+diff --git a/src/freedreno/vulkan/tu_autotune.h b/src/freedreno/vulkan/tu_autotune.h
+index 55e579ae93a..aba8d3e6f95 100644
+--- a/src/freedreno/vulkan/tu_autotune.h
++++ b/src/freedreno/vulkan/tu_autotune.h
+@@ -242,6 +242,7 @@ struct tu_autotune {
+    std::mutex rp_latency_mutex; /* Protects rp_latency_tracking */
+    uint64_t last_latency_cleanup_ts = 0;
+ 
++   const fd_perfcntr_group *cp_group;
+    uint32_t preemption_latency_selector_reg;
+    uint32_t preemption_latency_selector;
+    uint32_t preemption_latency_counter_reg_lo;
+-- 
+2.54.0
+

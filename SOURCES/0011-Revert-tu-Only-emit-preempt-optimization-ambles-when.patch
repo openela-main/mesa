@@ -1,0 +1,88 @@
+From f514b4c856c652c2c959f8a0cb1f215c191b1d10 Mon Sep 17 00:00:00 2001
+From: Jocelyn Falempe <jfalempe@redhat.com>
+Date: Fri, 26 Jun 2026 11:01:43 +0200
+Subject: [PATCH 11/19] Revert "tu: Only emit preempt optimization ambles when
+ active"
+
+This reverts commit 46aac5abaf0fb6382ad5d497d6cf0974fb6e1d84.
+---
+ src/freedreno/vulkan/tu_autotune.cc   | 6 ++----
+ src/freedreno/vulkan/tu_autotune.h    | 3 +--
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 6 +++---
+ 3 files changed, 6 insertions(+), 9 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 99ad1d495d5..c456c248cdb 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -2119,11 +2119,11 @@ tu_autotune::emit_reset_rp_hash_draw_state(struct tu_cmd_buffer *cmd, struct tu_
+    tu_cs_emit_qw(cs, reset_rp_hash_draw_state.iova);
+ }
+ 
+-bool
++void
+ tu_autotune::emit_preempt_latency_tracking_setup(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+ {
+    if (!cmd->autotune_ctx.tracks_preempt_latency())
+-      return false;
++      return;
+ 
+    tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 4);
+    tu_cs_emit_qw(cs, global_iova(cmd, max_preemption_latency));
+@@ -2143,8 +2143,6 @@ tu_autotune::emit_preempt_latency_tracking_setup(struct tu_cmd_buffer *cmd, stru
+ 
+    write_preempt_counters_to_iova(cs, true, true, global_iova(cmd, base_preemption_latency),
+                                   global_iova(cmd, base_always_count), global_iova(cmd, base_aon));
+-
+-   return true;
+ }
+ 
+ tu_autotune::rp_key_opt
+diff --git a/src/freedreno/vulkan/tu_autotune.h b/src/freedreno/vulkan/tu_autotune.h
+index aba8d3e6f95..868c06bb7d6 100644
+--- a/src/freedreno/vulkan/tu_autotune.h
++++ b/src/freedreno/vulkan/tu_autotune.h
+@@ -355,8 +355,7 @@ struct tu_autotune {
+    void init_reset_rp_hash_draw_state();
+    void emit_reset_rp_hash_draw_state(struct tu_cmd_buffer *cmd, struct tu_cs *cs) const;
+ 
+-   /* Returns if preemption latency tracking is enabled for this CB. */
+-   bool emit_preempt_latency_tracking_setup(struct tu_cmd_buffer *cmd, struct tu_cs *cs);
++   void emit_preempt_latency_tracking_setup(struct tu_cmd_buffer *cmd, struct tu_cs *cs);
+    /* Returns the RP hash only when preemption latency tracking is enabled. */
+    rp_key_opt emit_preempt_latency_tracking_rp_hash(struct tu_cmd_buffer *cmd);
+ };
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 082825fa84b..c345564dee7 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -2439,7 +2439,7 @@ tu_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+       tu7_set_thread_br_patchpoint(cmd, cs, false);
+    }
+ 
+-   bool track_preempt_latency = dev->autotune->emit_preempt_latency_tracking_setup(cmd, cs);
++   dev->autotune->emit_preempt_latency_tracking_setup(cmd, cs);
+ 
+    tu_cs_emit_pkt7(cs, CP_SET_AMBLE, 3);
+    tu_cs_emit_qw(cs, cmd->device->bin_preamble_entry.bo->iova +
+@@ -2465,7 +2465,7 @@ tu_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+                             (1u << TU_PREDICATE_VTX_STATS_NOT_RUNNING));
+    }
+ 
+-   if (dev->switch_back_amble_entry.size > 0 && track_preempt_latency) {
++   if (dev->switch_back_amble_entry.size > 0) {
+       tu_cs_emit_pkt7(cs, CP_SET_AMBLE, 3);
+       tu_cs_emit_qw(cs, dev->switch_back_amble_entry.bo->iova + dev->switch_back_amble_entry.offset);
+       tu_cs_emit(cs, CP_SET_AMBLE_2_DWORDS(dev->switch_back_amble_entry.size / sizeof(uint32_t)) |
+@@ -2476,7 +2476,7 @@ tu_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+       tu_cs_emit(cs, CP_SET_AMBLE_2_TYPE(PREAMBLE_AMBLE_TYPE));
+    }
+    
+-   if (dev->switch_away_amble_entry.size > 0 && track_preempt_latency) {
++   if (dev->switch_away_amble_entry.size > 0) {
+       tu_cs_emit_pkt7(cs, CP_SET_AMBLE, 3);
+       tu_cs_emit_qw(cs, dev->switch_away_amble_entry.bo->iova + dev->switch_away_amble_entry.offset);
+       tu_cs_emit(cs, CP_SET_AMBLE_2_DWORDS(dev->switch_away_amble_entry.size / sizeof(uint32_t)) |
+-- 
+2.54.0
+
