@@ -1,8 +1,8 @@
 ## START: Set by rpmautospec
-## (rpmautospec version 0.8.3)
+## (rpmautospec version 0.8.4)
 ## RPMAUTOSPEC: autorelease, autochangelog
 %define autorelease(e:s:pb:n) %{?-p:0.}%{lua:
-    release_number = 4;
+    release_number = 2;
     base_release_number = tonumber(rpm.expand("%{?-b*}%{!?-b:1}"));
     print(release_number + base_release_number - 1);
 }%{?-e:.%{-e*}}%{?-s:.%{-s*}}%{!?-n:%{?dist}}
@@ -10,10 +10,10 @@
 
 %ifnarch s390x
 %global with_hardware 1
+%global with_kmsro 1
 %global with_radeonsi 1
 %global with_vmware 1
 %global with_vulkan_hw 1
-%global with_vdpau 1
 %if !0%{?rhel}
 %global with_r300 1
 %global with_r600 1
@@ -57,12 +57,11 @@
 %global with_v3d       1
 %endif
 %global with_freedreno 1
-%global with_kmsro     1
 %global with_panfrost  1
 %if 0%{?with_asahi}
 %global asahi_platform_vulkan %{?with_vulkan_hw:,asahi}%{!?with_vulkan_hw:%{nil}}
 %endif
-%global extra_platform_vulkan %{?with_vulkan_hw:,broadcom,freedreno,panfrost,imagination-experimental}%{!?with_vulkan_hw:%{nil}}
+%global extra_platform_vulkan %{?with_vulkan_hw:,broadcom,freedreno,panfrost,imagination}%{!?with_vulkan_hw:%{nil}}
 %endif
 
 %if !0%{?rhel}
@@ -90,7 +89,7 @@
 
 Name:           mesa
 Summary:        Mesa graphics libraries
-%global ver 25.2.7
+%global ver 26.1.1
 Version:        %{gsub %ver - ~}
 Release:        %autorelease
 License:        MIT AND BSD-3-Clause AND SGI-B-2.0
@@ -109,7 +108,7 @@ Source2: https://github.com/mesonbuild/meson/releases/download/%{meson_ver}/meso
 
 # libclc is not available in RHEL but it is required for Intel drivers since
 # mesa >= 24.1.0
-%global libclc_version 21.1.3
+%global libclc_version 21.1.8
 Source3: https://github.com/llvm/llvm-project/releases/download/llvmorg-%{libclc_version}/libclc-%{libclc_version}.src.tar.xz
 BuildRequires:  libedit-devel
 BuildRequires:  clang-devel >= %{libclc_version}
@@ -117,8 +116,8 @@ BuildRequires:  clang-devel >= %{libclc_version}
 # BuildRequires:  spirv-llvm-translator-tools
 
 # spirv-llvm-translator is a dependency of libclc
-%global spirv_llvm_trans_ver 21.1.2
-%global spirv_llvm_trans_commit a37544fc0bb90b4e8b8d755580119c018891dfa4
+%global spirv_llvm_trans_ver 22.1.1
+%global spirv_llvm_trans_commit 114f5ee1cec66fe2ca733c12770c1bc196675d32
 %global spirv_llvm_trans_shortcommit %(c=%{spirv_llvm_trans_commit}; echo ${c:0:7})
 Source4: https://github.com/KhronosGroup/SPIRV-LLVM-Translator/archive/%{spirv_llvm_trans_commit}/spirv-llvm-translator-%{spirv_llvm_trans_shortcommit}.tar.gz
 BuildRequires:  cmake
@@ -133,10 +132,10 @@ BuildRequires:  zlib-devel
 # https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/subprojects
 # but we generally want the latest compatible versions
 %global rust_paste_ver 1.0.15
-%global rust_proc_macro2_ver 1.0.101
-%global rust_quote_ver 1.0.40
-%global rust_syn_ver 2.0.106
-%global rust_unicode_ident_ver 1.0.18
+%global rust_proc_macro2_ver 1.0.106
+%global rust_quote_ver 1.0.44
+%global rust_syn_ver 2.0.115
+%global rust_unicode_ident_ver 1.0.23
 %global rustc_hash_ver 2.1.1
 Source10:       https://crates.io/api/v1/crates/paste/%{rust_paste_ver}/download#/paste-%{rust_paste_ver}.tar.gz
 Source11:       https://crates.io/api/v1/crates/proc-macro2/%{rust_proc_macro2_ver}/download#/proc-macro2-%{rust_proc_macro2_ver}.tar.gz
@@ -145,15 +144,9 @@ Source13:       https://crates.io/api/v1/crates/syn/%{rust_syn_ver}/download#/sy
 Source14:       https://crates.io/api/v1/crates/unicode-ident/%{rust_unicode_ident_ver}/download#/unicode-ident-%{rust_unicode_ident_ver}.tar.gz
 Source15:       https://crates.io/api/v1/crates/rustc-hash/%{rustc_hash_ver}/download#/rustc-hash-%{rustc_hash_ver}.tar.gz
 
-
-# fix zink/device-select bug
-Patch11:        0001-device-select-add-a-layer-setting-to-disable-device-.patch
-Patch12:        0002-zink-use-device-select-layer-settings-to-disable-dev.patch
-
 # Fix s390x regressions:
-# https://issues.redhat.com/browse/RHEL-144813
-Patch13:        0001-gallivm-handle-u16-correct-on-const-loads.patch
-Patch14:        0001-Revert-dri-fix-__DRI_IMAGE_FORMAT-to-PIPE_FORMAT-map.patch
+# https://issues.redhat.com/browse/RHEL-223979
+Patch10:        0001-Revert-dri-fix-__DRI_IMAGE_FORMAT-to-PIPE_FORMAT-map.patch
 
 BuildRequires:  meson
 BuildRequires:  gcc
@@ -178,6 +171,7 @@ BuildRequires:  pkgconfig(wayland-protocols) >= 1.34
 BuildRequires:  pkgconfig(wayland-client) >= 1.11
 BuildRequires:  pkgconfig(wayland-server) >= 1.11
 BuildRequires:  pkgconfig(wayland-egl-backend) >= 3
+BuildRequires:  pkgconfig(libdisplay-info)
 BuildRequires:  pkgconfig(x11)
 BuildRequires:  pkgconfig(xext)
 BuildRequires:  pkgconfig(xdamage) >= 1.1
@@ -200,9 +194,6 @@ BuildRequires:  bison
 BuildRequires:  flex
 %if 0%{?with_lmsensors}
 BuildRequires:  lm_sensors-devel
-%endif
-%if 0%{?with_vdpau}
-BuildRequires:  pkgconfig(vdpau) >= 1.1
 %endif
 %if 0%{?with_va}
 BuildRequires:  pkgconfig(libva) >= 0.38.0
@@ -258,6 +249,7 @@ Provides:       mesa-dri-filesystem = %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-omx-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-libd3d < %{?epoch:%{epoch}:}%{version}-%{release}
 Obsoletes:      mesa-libd3d-devel < %{?epoch:%{epoch}:}%{version}-%{release}
+Obsoletes:      mesa-vdpau-drivers < %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description filesystem
 %{summary}.
@@ -322,15 +314,6 @@ Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{rel
 Obsoletes:      %{name}-vaapi-drivers < 22.2.0-5
 
 %description va-drivers
-%{summary}.
-%endif
-
-%if 0%{?with_vdpau}
-%package        vdpau-drivers
-Summary:        Mesa-based VDPAU drivers
-Requires:       %{name}-filesystem%{?_isa} = %{?epoch:%{epoch}:}%{version}-%{release}
-
-%description vdpau-drivers
 %{summary}.
 %endif
 
@@ -440,9 +423,9 @@ path = "src/nouveau/nil/lib.rs"
 
 # only direct dependencies need to be listed here
 [dependencies]
-paste = "$(grep ^directory subprojects/paste.wrap | sed 's|.*-||')"
-syn = { version = "$(grep ^directory subprojects/syn.wrap | sed 's|.*-||')", features = ["clone-impls"] }
-rustc-hash = "$(grep ^directory subprojects/rustc-hash.wrap | sed 's|.*-||')"
+paste = "$(grep ^directory subprojects/paste*.wrap | sed 's|.*-||')"
+syn = { version = "$(grep ^directory subprojects/syn*.wrap | sed 's|.*-||')", features = ["clone-impls"] }
+rustc-hash = "$(grep ^directory subprojects/rustc-hash*.wrap | sed 's|.*-||')"
 _EOF
 %if 0%{?vendor_nvk_crates}
 %cargo_prep -v subprojects/packagecache
@@ -513,7 +496,7 @@ export RUSTFLAGS="%build_rustflags"
 export MESON_PACKAGE_CACHE_DIR="%{cargo_registry}/"
 %endif
 rewrite_wrap_file() {
-   sed -e "/source.*/d" -e "s/${1}-.*/$(basename ${MESON_PACKAGE_CACHE_DIR:-subprojects/packagecache}/${1}-*)/" -i subprojects/${1}.wrap
+  sed -e "/source.*/d" -e "s/^directory = ${1}-.*/directory = $(basename ${MESON_PACKAGE_CACHE_DIR:-subprojects/packagecache}/${1}-*)/" -i subprojects/${1}*.wrap
 }
 
 rewrite_wrap_file proc-macro2
@@ -531,7 +514,6 @@ rewrite_wrap_file rustc-hash
 %else
   -Dgallium-drivers=llvmpipe,virgl \
 %endif
-  -Dgallium-vdpau=%{?with_vdpau:enabled}%{!?with_vdpau:disabled} \
   -Dgallium-va=%{?with_va:enabled}%{!?with_va:disabled} \
   -Dgallium-mediafoundation=disabled \
   -Dteflon=%{?with_teflon:true}%{!?with_teflon:false} \
@@ -603,9 +585,6 @@ rm -f  %{buildroot}%{_libdir}/libLLVMSPIRVLib.so
 rm -f  %{buildroot}%{_libdir}/libLLVMSPIRVLib.so.*
 rm -f  %{buildroot}%{_libdir}/pkgconfig/LLVMSPIRVLib.pc
 
-# libvdpau opens the versioned name, don't bother including the unversioned
-rm -vf %{buildroot}%{_libdir}/vdpau/*.so
-
 # likewise glvnd
 rm -vf %{buildroot}%{_libdir}/libGLX_mesa.so
 rm -vf %{buildroot}%{_libdir}/libEGL_mesa.so
@@ -620,7 +599,7 @@ rm -vf %{buildroot}%{_libdir}/dri/apple_dri.so
 
 # glvnd needs a default provider for indirect rendering where it cannot
 # determine the vendor
-ln -s %{_libdir}/libGLX_mesa.so.0 %{buildroot}%{_libdir}/libGLX_system.so.0
+ln -s libGLX_mesa.so.0 %{buildroot}%{_libdir}/libGLX_system.so.0
 
 # this keeps breaking, check it early.  note that the exit from eu-ftr is odd.
 pushd %{buildroot}%{_libdir}
@@ -700,7 +679,7 @@ popd
 %{_libdir}/dri/i915_dri.so
 %endif
 %endif
-%ifarch aarch64 x86_64 %{ix86}
+%ifnarch s390x
 %if 0%{?with_asahi}
 %{_libdir}/dri/apple_dri.so
 %{_libdir}/dri/asahi_dri.so
@@ -794,22 +773,6 @@ popd
 %{_libdir}/dri/virtio_gpu_drv_video.so
 %endif
 
-%if 0%{?with_vdpau}
-%files vdpau-drivers
-%dir %{_libdir}/vdpau
-%{_libdir}/vdpau/libvdpau_nouveau.so.1*
-%if 0%{?with_r600}
-%{_libdir}/vdpau/libvdpau_r600.so.1*
-%endif
-%if 0%{?with_radeonsi}
-%{_libdir}/vdpau/libvdpau_radeonsi.so.1*
-%endif
-%if 0%{?with_d3d12}
-%{_libdir}/vdpau/libvdpau_d3d12.so.1*
-%endif
-%{_libdir}/vdpau/libvdpau_virtio_gpu.so.1*
-%endif
-
 %if 0%{?with_d3d12}
 %files dxil-devel
 %{_bindir}/spirv2dxil
@@ -861,7 +824,6 @@ popd
 %{_datadir}/vulkan/icd.d/freedreno_icd.*.json
 %{_libdir}/libvulkan_panfrost.so
 %{_datadir}/vulkan/icd.d/panfrost_icd.*.json
-%{_libdir}/libpowervr_rogue.so
 %{_libdir}/libvulkan_powervr_mesa.so
 %{_datadir}/vulkan/icd.d/powervr_mesa_icd.*.json
 %endif
@@ -869,6 +831,19 @@ popd
 
 %changelog
 ## START: Generated by rpmautospec
+* Mon Aug 17 2026 Jocelyn Falempe <jfalempe@redhat.com> - 26.1.1-2
+- Fix s390x regressions
+
+* Thu Jun 11 2026 Jocelyn Falempe <jfalempe@redhat.com> - 26.1.1-1
+- update to 26.1.1
+- remove patches that are in upstream
+- remove vdpau
+- update version of dependencies
+- update rust libwrap filename
+
+* Wed Mar 11 2026 Peter Kopec <pekopec@redhat.com> - 25.2.7-5
+- Include universal gating smoke test suite
+
 * Mon Feb 23 2026 José Expósito <jexposit@redhat.com> - 25.2.7-4
 - Fix s390x regressions
 
